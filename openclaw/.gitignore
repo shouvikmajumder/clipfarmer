@@ -1,0 +1,33 @@
+# Python
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+
+# macOS
+.DS_Store
+
+# Job working directories (raw footage and cut clips are large / transient)
+data/jobs/*/raw/
+data/jobs/*/clips/
+
+# SQLite databases
+data/*.db

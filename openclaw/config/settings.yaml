@@ -1,0 +1,18 @@
+general:
+  max_clip_length_s: 60
+  min_clip_score: 0.45
+  max_clips_per_job: 3
+  max_video_duration_hard_limit_s: 21600
+  min_free_disk_gb: 5
+  data_dir: data/
+
+worker:
+  whisper_model: medium
+  job_poll_interval_s: 5
+
+posting:
+  platforms:
+    - youtube
+    - tiktok
+    - instagram
+  max_retries: 3
