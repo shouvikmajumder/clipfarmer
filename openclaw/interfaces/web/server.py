@@ -11,17 +11,25 @@ itself and is intentionally not wired into ``main.py`` — run it directly:
     cd openclaw
     python interfaces/web/server.py
 
-The import of ``enqueue_job`` is wrapped defensively: ``core/state.py`` is
-being implemented in parallel and may not be ready yet. If the import or the
-call fails, the endpoint returns a clear 503 error instead of crashing the
-server.
+The import of ``enqueue_job`` is wrapped defensively in case ``core/state.py``
+is ever missing or broken. If the import or the call fails, the endpoint
+returns a clear 503 error instead of crashing the server.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
+
+# Running this file directly (``python interfaces/web/server.py``) puts only
+# this file's own directory on sys.path, not the openclaw/ package root, so
+# ``core`` would not be importable regardless of the caller's cwd. Add the
+# openclaw/ root explicitly so the import below always works.
+_OPENCLAW_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_OPENCLAW_ROOT) not in sys.path:
+    sys.path.insert(0, str(_OPENCLAW_ROOT))
 
 try:
     from core.state import enqueue_job
