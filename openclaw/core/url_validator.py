@@ -96,7 +96,12 @@ def validate_url(url: str) -> dict:
 
     import yt_dlp
 
-    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+    }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -107,6 +112,19 @@ def validate_url(url: str) -> dict:
 
     if info is None:
         raise VideoUnavailableError(f"Could not access video at {url!r}: no info returned")
+
+    # Defense in depth against playlist-shaped info dicts (e.g. a
+    # watch?v=...&list=... URL that yt-dlp resolves as a playlist despite
+    # noplaylist=True, or any other code path that bypasses it): such dicts
+    # carry "_type": "playlist" and/or an "entries" list instead of top-level
+    # "duration"/"is_live" fields, which would otherwise silently skip the
+    # live-stream and duration checks below (duration_s would default to 0,
+    # is_live would default to falsy). Reject explicitly rather than letting
+    # those checks pass through unintentionally.
+    if info.get("_type") == "playlist" or "entries" in info:
+        raise VideoUnavailableError(
+            f"Expected a single video but got a playlist: {url!r}"
+        )
 
     if info.get("is_live"):
         raise LiveStreamNotSupportedError(

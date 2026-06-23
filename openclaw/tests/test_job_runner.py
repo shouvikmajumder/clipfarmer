@@ -367,3 +367,291 @@ def test_run_resumes_inflight_jobs_on_startup(runner: JobRunner, monkeypatch):
     patches["processing.editor.crop_to_vertical"].assert_called()
     patches["processing.caption_burner.burn_captions"].assert_called()
     patches["processing.formatter.format_clip"].assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Resume from a fully-completed "formatting" stage (fix #2)
+# ---------------------------------------------------------------------------
+
+
+def test_resume_from_formatting_complete_skips_reformatting_goes_straight_to_posting(
+    runner: JobRunner,
+):
+    """Resuming with last_stage_completed="formatting" must NOT re-invoke
+    crop_to_vertical/burn_captions/format_clip -- formatting already fully
+    completed and persisted clips for this job. The pipeline should jump
+    straight to posting, reading clips from disk via get_clips_for_job.
+    """
+    job_id = state.enqueue_job("https://www.youtube.com/watch?v=formatted")
+    state.update_job_metadata(
+        job_id, youtube_id="formatted", video_title="Formatted Video", video_duration_s=60
+    )
+    state.mark_stage_complete(job_id, "downloading")
+    state.mark_stage_complete(job_id, "transcribing")
+    state.mark_stage_complete(job_id, "detecting")
+    state.mark_stage_complete(job_id, "editing")
+    state.mark_stage_complete(job_id, "captioning")
+    state.mark_stage_complete(job_id, "formatting")
+
+    # Simulate clips already fully persisted from the completed formatting run.
+    state.add_clip(
+        job_id,
+        {
+            "file_path": f"data/jobs/{job_id}/clips/clip_0.mp4",
+            "score": 0.9,
+            "start_s": 0.0,
+            "end_s": 10.0,
+            "transcript_snippet": "Hello world",
+        },
+    )
+
+    job = state.get_job(job_id)
+    assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("posting")
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    patches["processing.editor.crop_to_vertical"].assert_not_called()
+    patches["processing.caption_burner.burn_captions"].assert_not_called()
+    patches["processing.formatter.format_clip"].assert_not_called()
+    # downloading/transcribing/detecting are also skipped since start_idx is
+    # past formatting -- the early-return branch never touches them either.
+    patches["processing.downloader.download"].assert_not_called()
+    patches["processing.transcriber.transcribe"].assert_not_called()
+    patches["processing.clip_detector.detect_clips"].assert_not_called()
+
+    final_job = state.get_job(job_id)
+    assert final_job["state"] == "complete"
+
+    clips = state.get_clips_for_job(job_id)
+    assert len(clips) == 1
+
+    posts = state.get_posts(job_id)
+    # 1 clip x 3 platforms (default settings.yaml platforms list)
+    assert len(posts) == 3
+
+
+# ---------------------------------------------------------------------------
+# Duplicate clip prevention on resume mid-formatting (fix #1)
+# ---------------------------------------------------------------------------
+
+
+def test_resume_mid_formatting_does_not_duplicate_persisted_clips(runner: JobRunner):
+    """Simulate a crash mid-formatting: one clip was already persisted via
+    state.add_clip() before the crash, but mark_stage_complete(job_id,
+    "formatting") never got written (so last_stage_completed is still
+    "captioning"). Resuming must re-run _format_clips without re-adding the
+    already-persisted clip, and posting must not double-post it.
+    """
+    job_id = state.enqueue_job("https://www.youtube.com/watch?v=midformat")
+    state.update_job_metadata(
+        job_id, youtube_id="midformat", video_title="Mid Format Video", video_duration_s=60
+    )
+    state.mark_stage_complete(job_id, "downloading")
+    state.mark_stage_complete(job_id, "transcribing")
+    state.mark_stage_complete(job_id, "detecting")
+    state.mark_stage_complete(job_id, "editing")
+    state.mark_stage_complete(job_id, "captioning")
+    # Note: formatting NOT marked complete -- simulates a crash partway
+    # through _format_clips after add_clip() for the first clip window.
+
+    # CLIP_WINDOWS[0] is {"start_s": 0.0, "end_s": 10.0, "score": 0.9}.
+    state.add_clip(
+        job_id,
+        {
+            "file_path": f"data/jobs/{job_id}/clips/clip_0.mp4",
+            "score": 0.9,
+            "start_s": 0.0,
+            "end_s": 10.0,
+            "transcript_snippet": "Hello world, this is amazing.",
+        },
+    )
+
+    job = state.get_job(job_id)
+    assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("formatting")
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job_id)
+    assert final_job["state"] == "complete"
+
+    clips = state.get_clips_for_job(job_id)
+    # Exactly 2 clips total (one for each CLIP_WINDOWS entry) -- no duplicate
+    # for the window that was already persisted before the simulated crash.
+    assert len(clips) == 2
+    windows = [(c["start_s"], c["end_s"]) for c in clips]
+    assert len(windows) == len(set(windows)), "duplicate clip window detected"
+
+    # format_clip should only be called for the NOT-yet-persisted window
+    # (start_s=10.0); the already-persisted clip (start_s=0.0) is skipped.
+    format_clip_mock = patches["processing.formatter.format_clip"]
+    assert format_clip_mock.call_count == 1
+
+    # Posting: 2 clips x 3 platforms = 6 posts, never more (no double-posting
+    # of the clip that survived the crash).
+    posts = state.get_posts(job_id)
+    assert len(posts) == 6
+
+
+# ---------------------------------------------------------------------------
+# Cleanup of raw downloads / intermediate files on completion (fix #3)
+# ---------------------------------------------------------------------------
+
+
+def test_completion_cleans_up_raw_and_intermediate_files_keeps_final_clips(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """After mark_job_complete, raw/ downloads and edited_*/captioned_*
+    intermediate files must be deleted, while the final clip_*.mp4 files
+    referenced by persisted clip records survive.
+    """
+    job = _make_job()
+    job_id = job["id"]
+    job_dir = isolated_jobs_dir / job_id
+    raw_dir = job_dir / "raw"
+    clips_dir = job_dir / "clips"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_video = raw_dir / "abc123.mp4"
+    raw_video.write_bytes(b"raw video bytes")
+
+    def make_intermediate_and_final(idx: int):
+        (clips_dir / f"edited_{idx}.mp4").write_bytes(b"edited")
+        (clips_dir / f"captioned_{idx}.mp4").write_bytes(b"captioned")
+        final_path = clips_dir / f"clip_{idx}.mp4"
+        final_path.write_bytes(b"final")
+        return str(final_path)
+
+    def crop_side_effect(input_path, start_s, end_s, output_path):
+        Path(output_path).write_bytes(b"edited")
+        return output_path
+
+    def burn_side_effect(input_path, segments, output_path):
+        Path(output_path).write_bytes(b"captioned")
+        return output_path
+
+    def format_side_effect(input_path, output_path, **kw):
+        Path(output_path).write_bytes(b"final")
+        return output_path
+
+    patches = _patch_pipeline(
+        crop_to_vertical_side_effect=crop_side_effect,
+        burn_captions_side_effect=burn_side_effect,
+        format_clip_side_effect=format_side_effect,
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job_id)
+    assert final_job["state"] == "complete"
+
+    clips = state.get_clips_for_job(job_id)
+    assert len(clips) == 2
+
+    # Raw downloads must be gone.
+    assert not raw_video.exists()
+    assert list(raw_dir.iterdir()) == []
+
+    # Intermediate files must be gone.
+    assert list(clips_dir.glob("edited_*.mp4")) == []
+    assert list(clips_dir.glob("captioned_*.mp4")) == []
+
+    # Final clip files referenced by persisted clip records must survive.
+    for clip in clips:
+        assert Path(clip["file_path"]).exists()
+
+
+# ---------------------------------------------------------------------------
+# Disk-space pre-check before downloading (fix #5)
+# ---------------------------------------------------------------------------
+
+
+def test_low_disk_space_fails_job_before_downloading(runner: JobRunner, monkeypatch):
+    """If shutil.disk_usage reports free space below general.min_free_disk_gb,
+    the job must be marked failed with a clear message, and download() must
+    never be called -- the worker process itself must not crash.
+    """
+    job = _make_job()
+
+    class _FakeUsage:
+        total = 100 * 1024 ** 3
+        used = 99 * 1024 ** 3
+        free = 1 * 1024 ** 3  # 1GB free, below the 5GB default threshold
+
+    monkeypatch.setattr(
+        "core.job_runner.shutil.disk_usage", MagicMock(return_value=_FakeUsage())
+    )
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "failed"
+    assert "disk space" in final_job["error_message"].lower()
+
+    patches["processing.downloader.download"].assert_not_called()
+
+
+def test_sufficient_disk_space_proceeds_to_download(runner: JobRunner, monkeypatch):
+    job = _make_job()
+
+    class _FakeUsage:
+        total = 100 * 1024 ** 3
+        used = 10 * 1024 ** 3
+        free = 90 * 1024 ** 3  # plenty of room
+
+    monkeypatch.setattr(
+        "core.job_runner.shutil.disk_usage", MagicMock(return_value=_FakeUsage())
+    )
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "complete"
+    patches["processing.downloader.download"].assert_called_once()
+
+
+def test_disk_usage_check_failure_does_not_crash_worker(runner: JobRunner, monkeypatch):
+    """If shutil.disk_usage itself raises (e.g. odd filesystem), the worker
+    process must not crash -- the job should proceed as if space were
+    sufficient rather than propagating the exception.
+    """
+    job = _make_job()
+
+    monkeypatch.setattr(
+        "core.job_runner.shutil.disk_usage",
+        MagicMock(side_effect=OSError("disk_usage unsupported")),
+    )
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "complete"
+    patches["processing.downloader.download"].assert_called_once()

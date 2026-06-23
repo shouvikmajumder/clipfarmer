@@ -20,6 +20,7 @@ fails the job once at least one clip was produced.
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ _TERMINAL_STATES = {"complete", "failed", "cancelled"}
 DEFAULT_JOB_POLL_INTERVAL_S = 5
 DEFAULT_MAX_CLIPS = 3
 DEFAULT_PLATFORMS = ["youtube", "tiktok", "instagram"]
+DEFAULT_MIN_FREE_DISK_GB = 5
 
 
 def _load_settings() -> dict[str, Any]:
@@ -89,6 +91,9 @@ class JobRunner:
             "max_clips_per_job", DEFAULT_MAX_CLIPS
         )
         self.platforms: list[str] = posting_settings.get("platforms", DEFAULT_PLATFORMS)
+        self.min_free_disk_gb: float = general_settings.get(
+            "min_free_disk_gb", DEFAULT_MIN_FREE_DISK_GB
+        )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -215,12 +220,33 @@ class JobRunner:
         """
         job_id = job["id"]
         start_idx = self.get_resume_index(job)
+        formatting_idx = self.STAGE_ORDER.index("formatting")
 
         video_path: str | None = None
         segments: list[dict] = []
         clip_windows: list[dict] = []
         edited_clips: list[dict] = []
         captioned_clips: list[dict] = []
+
+        # Crash-resume case: if we're resuming from "formatting" already
+        # complete (i.e. start_idx is past formatting, headed straight to
+        # posting), the persisted clips in clips.json are the full, final
+        # output of the formatting stage -- crop_to_vertical/burn_captions/
+        # format_clip must NOT be re-invoked, since doing so would re-process
+        # clips that are already fully formatted and posted/postable. Skip
+        # straight to posting, which reads clips from disk via
+        # state.get_clips_for_job.
+        if start_idx > formatting_idx:
+            if start_idx > self.STAGE_ORDER.index("posting"):
+                self._cleanup_job_files(job_id)
+                state.mark_job_complete(job_id)
+                return
+            state.update_job_stage(job_id, "posting")
+            self._post_all(job)
+            state.mark_stage_complete(job_id, "posting")
+            self._cleanup_job_files(job_id)
+            state.mark_job_complete(job_id)
+            return
 
         # Crash-resume case: if we're skipping straight past downloading
         # and/or transcribing (already marked complete on disk from a prior
@@ -231,6 +257,8 @@ class JobRunner:
         # is read-only against that file), so this trades a bit of redundant
         # work for correctness after a crash.
         if start_idx > self.STAGE_ORDER.index("downloading"):
+            if not self._has_enough_disk_space(job_id):
+                return
             video_path = self._download(job)
         if start_idx > self.STAGE_ORDER.index("transcribing"):
             segments = self._transcribe(video_path, job)
@@ -254,6 +282,8 @@ class JobRunner:
             state.update_job_stage(job_id, stage_name)
 
             if stage_name == "downloading":
+                if not self._has_enough_disk_space(job_id):
+                    return
                 video_path = self._download(job)
             elif stage_name == "transcribing":
                 segments = self._transcribe(video_path, job)
@@ -290,11 +320,55 @@ class JobRunner:
 
             state.mark_stage_complete(job_id, stage_name)
 
+        self._cleanup_job_files(job_id)
         state.mark_job_complete(job_id)
 
     # ------------------------------------------------------------------
     # Stage implementations
     # ------------------------------------------------------------------
+
+    def _has_enough_disk_space(self, job_id: str) -> bool:
+        """Check free disk space against ``general.min_free_disk_gb`` before
+        starting the downloading stage.
+
+        Uses ``shutil.disk_usage`` against the job data directory's
+        filesystem. If free space is below the configured threshold, marks
+        the job failed with a clear message and returns ``False`` (the
+        caller must not proceed to download). Never raises: any unexpected
+        error from ``disk_usage`` itself is logged and treated as "enough
+        space" so a misconfigured/odd filesystem never crashes the worker
+        process outright.
+
+        Args:
+            job_id: The UUID of the job about to start downloading.
+
+        Returns:
+            ``True`` if there is enough free disk space to proceed,
+            ``False`` if the job was marked failed due to insufficient space.
+        """
+        check_path = state.JOBS_DIR
+        check_path.mkdir(parents=True, exist_ok=True)
+        try:
+            usage = shutil.disk_usage(check_path)
+        except OSError as exc:
+            logger.warning(
+                "Job %s: disk_usage check failed (%s), proceeding without it",
+                job_id,
+                exc,
+            )
+            return True
+
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < self.min_free_disk_gb:
+            message = (
+                f"Insufficient free disk space: {free_gb:.2f}GB available, "
+                f"{self.min_free_disk_gb}GB required (general.min_free_disk_gb)"
+            )
+            logger.error("Job %s: %s", job_id, message)
+            state.mark_job_failed(job_id, message)
+            return False
+
+        return True
 
     def _download(self, job: dict) -> str:
         """Download the source video for *job* and return its local path."""
@@ -437,10 +511,45 @@ class JobRunner:
         job_id = job["id"]
         clips_dir = state.JOBS_DIR / job_id / "clips"
 
+        # Crash-resume safety: if a prior run already persisted a clip for
+        # this (start_s, end_s) window (or file_path) before crashing
+        # mid-formatting -- i.e. state.add_clip() succeeded but
+        # mark_stage_complete(job_id, "formatting") never got written --
+        # re-running this stage from scratch must not re-add it. Re-adding
+        # would create a duplicate clip record and lead to the clip being
+        # posted twice during the posting stage.
+        existing_clips = state.get_clips_for_job(job_id)
+        existing_windows = {
+            (existing.get("start_s"), existing.get("end_s"))
+            for existing in existing_clips
+        }
+        existing_paths = {existing.get("file_path") for existing in existing_clips}
+
         final_clips: list[dict] = []
         for clip in captioned_clips:
             idx = clip["index"]
             output_path = str(clips_dir / f"clip_{idx}.mp4")
+
+            window_key = (clip.get("start_s"), clip.get("end_s"))
+            if window_key in existing_windows or output_path in existing_paths:
+                logger.info(
+                    "Job %s: clip %d already persisted (resume), skipping re-add",
+                    job_id,
+                    idx,
+                )
+                matching = next(
+                    (
+                        existing
+                        for existing in existing_clips
+                        if (existing.get("start_s"), existing.get("end_s")) == window_key
+                        or existing.get("file_path") == output_path
+                    ),
+                    None,
+                )
+                if matching is not None:
+                    final_clips.append(matching)
+                continue
+
             try:
                 format_clip(clip["captioned_path"], output_path)
             except Exception as exc:  # noqa: BLE001 - isolate per-clip failures
@@ -507,3 +616,51 @@ class JobRunner:
                     state.mark_post_failed(post_id, str(exc))
                     continue
                 state.mark_post_success(post_id, post_url)
+
+    def _cleanup_job_files(self, job_id: str) -> None:
+        """Delete raw downloads and intermediate per-clip files once a job
+        is done, keeping only the final ``clip_*.mp4`` outputs referenced in
+        ``clips.json``.
+
+        Removes everything under ``data/jobs/<job_id>/raw/`` (the original
+        downloaded source video, no longer needed post-pipeline) and any
+        ``edited_*.mp4`` / ``captioned_*.mp4`` intermediate files left behind
+        in ``data/jobs/<job_id>/clips/`` by the editing/captioning stages.
+        Final ``clip_*.mp4`` files (the ones persisted in clips.json via
+        ``state.add_clip``) are left untouched.
+
+        Best-effort: any OSError while deleting a given file/dir is logged
+        and skipped rather than propagated, so cleanup failures never fail
+        an otherwise-successful job.
+        """
+        job_dir = state.JOBS_DIR / job_id
+        raw_dir = job_dir / "raw"
+        clips_dir = job_dir / "clips"
+
+        if raw_dir.exists():
+            for raw_file in raw_dir.iterdir():
+                try:
+                    if raw_file.is_file():
+                        raw_file.unlink()
+                    elif raw_file.is_dir():
+                        shutil.rmtree(raw_file)
+                except OSError as exc:
+                    logger.warning(
+                        "Job %s: failed to remove raw file %s during cleanup: %s",
+                        job_id,
+                        raw_file,
+                        exc,
+                    )
+
+        if clips_dir.exists():
+            for pattern in ("edited_*.mp4", "captioned_*.mp4"):
+                for intermediate_file in clips_dir.glob(pattern):
+                    try:
+                        intermediate_file.unlink()
+                    except OSError as exc:
+                        logger.warning(
+                            "Job %s: failed to remove intermediate file %s during cleanup: %s",
+                            job_id,
+                            intermediate_file,
+                            exc,
+                        )

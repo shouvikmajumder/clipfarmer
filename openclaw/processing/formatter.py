@@ -121,6 +121,12 @@ def format_clip(
         max_duration_s = _load_max_clip_length_s()
 
     source_duration_s = _probe_duration_s(input_path)
+    if source_duration_s <= 0:
+        raise RuntimeError(
+            f"format_clip: probed source duration for {input_path!r} is "
+            f"invalid ({source_duration_s}s) -- refusing to encode a "
+            f"degenerate clip"
+        )
     trim_duration_s = min(source_duration_s, float(max_duration_s))
 
     max_size_bytes = max_size_mb * 1024 * 1024

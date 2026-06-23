@@ -18,11 +18,11 @@ def post_to_youtube(clip: dict) -> str:
        ``#Shorts`` hashtag, category 22 (People & Blogs), and
        ``privacyStatus="public"``.
     3. Initiate a resumable upload using ``googleapiclient.http.MediaFileUpload``
-       with the final MP4 at ``clip["final_path"]``.
+       with the final MP4 at ``clip["file_path"]``.
     4. Poll upload status until complete, then return the watch URL.
 
     Args:
-        clip: Clip dict containing at minimum ``clip_id``, ``final_path``,
+        clip: Clip dict containing at minimum ``clip_id``, ``file_path``,
               and ``title`` fields.
 
     Returns:

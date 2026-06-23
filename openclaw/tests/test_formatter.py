@@ -163,3 +163,28 @@ def test_format_clip_raises_runtime_error_on_probe_failure(mock_ffmpeg, tmp_path
 
     with pytest.raises(RuntimeError, match="ffprobe failed"):
         formatter.format_clip(INPUT_PATH, output_path, max_duration_s=60, max_size_mb=50)
+
+
+def test_format_clip_raises_runtime_error_on_zero_source_duration(mock_ffmpeg, tmp_path):
+    """A probed source duration of 0.0 (or negative) must raise immediately,
+    before any encode attempt, rather than proceeding to encode a degenerate
+    clip.
+    """
+    output_path = str(tmp_path / "out.mp4")
+    mock_ffmpeg.probe.return_value = {"format": {"duration": "0.0"}}
+
+    with pytest.raises(RuntimeError, match="invalid"):
+        formatter.format_clip(INPUT_PATH, output_path, max_duration_s=60, max_size_mb=50)
+
+    # No encode attempt should have been made.
+    mock_ffmpeg.input.assert_not_called()
+
+
+def test_format_clip_raises_runtime_error_on_negative_source_duration(mock_ffmpeg, tmp_path):
+    output_path = str(tmp_path / "out.mp4")
+    mock_ffmpeg.probe.return_value = {"format": {"duration": "-1.0"}}
+
+    with pytest.raises(RuntimeError, match="invalid"):
+        formatter.format_clip(INPUT_PATH, output_path, max_duration_s=60, max_size_mb=50)
+
+    mock_ffmpeg.input.assert_not_called()

@@ -102,3 +102,64 @@ def test_extract_info_returning_none_rejected(mock_extract_info):
 
     with pytest.raises(VideoUnavailableError):
         validate_url(VALID_URL)
+
+
+# ---------------------------------------------------------------------------
+# noplaylist / playlist-shaped info dict (fix #4)
+# ---------------------------------------------------------------------------
+
+
+@patch("yt_dlp.YoutubeDL.YoutubeDL.extract_info")
+def test_ydl_opts_sets_noplaylist_true(mock_extract_info):
+    """A watch?v=...&list=... URL must not be resolved as a playlist by
+    yt-dlp -- noplaylist=True must be present in the preflight ydl_opts.
+    """
+    import importlib
+
+    yt_dlp_youtubedl_module = importlib.import_module("yt_dlp.YoutubeDL")
+
+    mock_extract_info.return_value = _make_info()
+    captured_opts = {}
+    original_init = yt_dlp_youtubedl_module.YoutubeDL.__init__
+
+    def capturing_init(self, opts=None, *args, **kwargs):
+        captured_opts.update(opts or {})
+        return original_init(self, opts, *args, **kwargs)
+
+    with patch("yt_dlp.YoutubeDL.YoutubeDL.__init__", capturing_init):
+        validate_url(VALID_URL + "&list=PLxyz")
+
+    assert captured_opts.get("noplaylist") is True
+
+
+@patch("yt_dlp.YoutubeDL.YoutubeDL.extract_info")
+def test_playlist_shaped_info_dict_rejected(mock_extract_info):
+    """If extract_info still returns a playlist-shaped dict (no top-level
+    duration/is_live, just _type=playlist and entries), it must be rejected
+    rather than silently bypassing the live-stream and duration checks.
+    """
+    mock_extract_info.return_value = {
+        "_type": "playlist",
+        "id": "PLxyz",
+        "title": "Some Playlist",
+        "entries": [{"id": "abc", "duration": 600, "is_live": False}],
+    }
+
+    with pytest.raises(VideoUnavailableError):
+        validate_url(VALID_URL + "&list=PLxyz")
+
+
+@patch("yt_dlp.YoutubeDL.YoutubeDL.extract_info")
+def test_info_dict_with_entries_but_no_type_rejected(mock_extract_info):
+    """Even without an explicit _type field, the presence of "entries"
+    (and absence of top-level duration/is_live) signals a playlist-shaped
+    response that must not silently pass validation.
+    """
+    mock_extract_info.return_value = {
+        "id": "PLxyz",
+        "title": "Some Playlist",
+        "entries": [{"id": "abc"}],
+    }
+
+    with pytest.raises(VideoUnavailableError):
+        validate_url(VALID_URL + "&list=PLxyz")
