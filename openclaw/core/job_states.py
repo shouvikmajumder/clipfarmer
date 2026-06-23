@@ -27,7 +27,7 @@ class JobState(str, Enum):
 
 
 VALID_TRANSITIONS: dict[JobState, list[JobState]] = {
-    JobState.QUEUED: [JobState.DOWNLOADING, JobState.CANCELLED],
+    JobState.QUEUED: [JobState.DOWNLOADING, JobState.FAILED, JobState.CANCELLED],
     JobState.DOWNLOADING: [JobState.TRANSCRIBING, JobState.FAILED, JobState.CANCELLED],
     JobState.TRANSCRIBING: [JobState.DETECTING, JobState.FAILED, JobState.CANCELLED],
     JobState.DETECTING: [JobState.EDITING, JobState.FAILED, JobState.CANCELLED],
@@ -55,4 +55,10 @@ def assert_valid_transition(from_state: JobState, to_state: JobState) -> None:
         ValueError: With a descriptive message including both states when the
                     transition is not listed in ``VALID_TRANSITIONS``.
     """
-    raise NotImplementedError
+    allowed = VALID_TRANSITIONS.get(from_state, [])
+    if to_state not in allowed:
+        raise ValueError(
+            f"Invalid job state transition: {from_state.value!r} -> {to_state.value!r}. "
+            f"Allowed transitions from {from_state.value!r}: "
+            f"{[s.value for s in allowed] or 'none (terminal state)'}"
+        )

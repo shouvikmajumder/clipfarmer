@@ -17,14 +17,14 @@ def post_to_tiktok(clip: dict) -> str:
        ``TIKTOK_ACCESS_TOKEN`` env vars.
     2. Call ``POST /v2/post/publish/video/init`` to obtain an upload URL and
        ``publish_id``.
-    3. Upload the MP4 binary (from ``clip["final_path"]``) to the provided
+    3. Upload the MP4 binary (from ``clip["file_path"]``) to the provided
        upload URL via a PUT request.
     4. Poll ``POST /v2/post/publish/status/fetch`` until the video status
        transitions to ``"PUBLISH_COMPLETE"``.
     5. Construct and return the public TikTok share URL.
 
     Args:
-        clip: Clip dict containing at minimum ``clip_id``, ``final_path``,
+        clip: Clip dict containing at minimum ``clip_id``, ``file_path``,
               and ``title`` fields.
 
     Returns:

@@ -27,7 +27,7 @@ def post_to_instagram(clip: dict) -> str:
     6. Retrieve and return the permalink from the published media object.
 
     Args:
-        clip: Clip dict containing at minimum ``clip_id``, ``final_path``,
+        clip: Clip dict containing at minimum ``clip_id``, ``file_path``,
               ``cdn_url`` (optional), and ``title`` fields.
 
     Returns:
