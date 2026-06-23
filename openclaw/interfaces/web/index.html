@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenClaw — Submit a video</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="card">
+    <h1>OpenClaw</h1>
+    <p class="subtitle">Paste a YouTube URL. We'll turn it into clips and post them for you.</p>
+
+    <form id="job-form" novalidate>
+      <label for="url" class="visually-hidden">YouTube URL</label>
+      <input
+        id="url"
+        name="url"
+        type="url"
+        inputmode="url"
+        placeholder="https://www.youtube.com/watch?v=..."
+        autocomplete="off"
+        required
+      />
+      <button id="submit-btn" type="submit">Process</button>
+    </form>
+
+    <p id="message" class="message" role="status" aria-live="polite"></p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
