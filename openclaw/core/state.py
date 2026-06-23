@@ -189,6 +189,21 @@ def update_job_stage(job_id: str, stage: str) -> None:
     _update_job(job_id, current_stage=stage, state=stage)
 
 
+def update_job_metadata(job_id: str, **fields: Any) -> None:
+    """Merge arbitrary metadata fields into ``job.json``.
+
+    Used by ``core.job_runner`` after pre-flight URL validation to persist
+    ``youtube_id``, ``video_title``, and ``video_duration_s`` onto the job
+    record. Follows the same atomic read-modify-write pattern as the other
+    job mutators in this module.
+
+    Args:
+        job_id: The UUID of the job to update.
+        **fields: Arbitrary key/value pairs to merge into the job dict.
+    """
+    _update_job(job_id, **fields)
+
+
 def mark_stage_complete(job_id: str, stage: str) -> None:
     """Record *stage* as the most recently completed stage in ``job.json``.
 
