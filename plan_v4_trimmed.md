@@ -148,6 +148,13 @@ All writes go through `core/state.py`, which reads the relevant JSON file, mutat
 
 ## 4. Job State Machine
 
+**Scope note:** this pipeline's only job is to turn a submitted URL into a
+downloaded video file on disk, queued so many videos can be submitted without
+blocking on each other. Clip curation (transcription, clip scoring, cropping,
+captioning, formatting) and posting are a **separate downstream workflow**,
+built later once we've done more research into generating good clips. They
+are not wired into this state machine.
+
 ```
 queued
   │
@@ -160,28 +167,14 @@ pre-flight            ← yt-dlp extract_info(download=False): validate URL,
 downloading
   │
   ▼
-transcribing
-  │
-  ▼
-detecting
-  │
-  ▼
-editing
-  │
-  ▼
-captioning
-  │
-  ▼
-formatting
-  │
-  ▼
-posting               ← auto-post all clips to all platforms
-  │
-  ▼
-complete
+complete              ← video file is on disk, ready for the clip-curation
+                          workflow to pick up later
 ```
 
-Every transition writes `last_stage_completed` before advancing. On worker restart, any job not in `complete / failed / cancelled` resumes from `last_stage_completed + 1`.
+Jobs are processed one at a time, FIFO, oldest `submitted_at` first. On
+worker restart, any job not in `complete / failed / cancelled` resumes by
+re-running the downloading stage (yt-dlp's own download is idempotent/
+resumable, so re-running it is safe).
 
 ---
 
@@ -189,9 +182,6 @@ Every transition writes `last_stage_completed` before advancing. On worker resta
 
 ```python
 class JobRunner:
-    def __init__(self):
-        self.whisper = mlx_whisper.load_model('medium')  # load once at startup
-
     def run(self):
         while True:
             job = state.get_next_queued_job()
@@ -205,28 +195,28 @@ class JobRunner:
                 logger.error(f"Job {job.id} failed: {e}")
 
     def process(self, job):
-        stages = [
-            ('downloading',  self.download),
-            ('transcribing', self.transcribe),
-            ('detecting',    self.detect_clips),
-            ('editing',      self.edit),
-            ('captioning',   self.add_captions),
-            ('formatting',   self.format_clips),
-            ('posting',      self.post_all),
-        ]
-        start_idx = self.get_resume_index(job)
-        for i, (stage_name, fn) in enumerate(stages[start_idx:], start=start_idx):
-            state.update_job_stage(job.id, stage_name)
-            fn(job)
-            state.mark_stage_complete(job.id, stage_name)
+        metadata = validate_url(job.youtube_url)   # cancels job on bad input
+        state.update_job_metadata(job.id, **metadata)
+        state.update_job_stage(job.id, 'downloading')
+        download(job)                               # processing/downloader.py
+        state.mark_stage_complete(job.id, 'downloading')
         state.mark_job_complete(job.id)
 ```
 
-Single worker, one job at a time. Whisper stays loaded in RAM between jobs. Raw download deleted after job completes.
+Single worker, sequential FIFO queue — one download at a time, in submission
+order. No transcription model to load, no clip processing in this loop.
+Downloaded files are **kept** (not cleaned up) since they're the deliverable
+the next workflow reads from.
 
 ---
 
-## 6. Clip Detector — 5 Universal Signals
+## 6. Clip Detector — 5 Universal Signals (deferred, needs more research)
+
+> **Not built in this phase.** This is a placeholder design for the future
+> clip-curation workflow, kept here for reference. It is not implemented or
+> called by `job_runner.py`. Before building it for real we need more
+> research into what actually makes a good clip — the weights/signals below
+> are a starting hypothesis, not a finished design.
 
 | Signal | Weight | Rationale |
 |---|---|---|
@@ -240,7 +230,13 @@ Outputs ranked clip windows `(start_s, end_s, score)`. Score threshold: 0.45. Ma
 
 ---
 
-## 7. Posting — Automatic, All Platforms
+## 7. Posting — Automatic, All Platforms (deferred, not part of this pipeline)
+
+> **Not built in this phase.** This pipeline stops at "video downloaded to
+> disk." Clip detection, editing, captioning, formatting, and posting become
+> their own downstream workflow once we've researched how to reliably
+> generate good clips. The sections below describe that future workflow's
+> intended shape; they are not implemented or wired into `job_runner.py`.
 
 After `formatting`, `post_all` iterates every clip and posts it to all three platforms without user confirmation. Each platform gets its own row in `posts`. Failures are retried up to 3× with exponential backoff; after that the post is marked `failed` and the clip is still kept in DB.
 
@@ -264,20 +260,23 @@ def post_all(self, job):
 ## 8. Entry Point (main.py)
 
 ```python
-# Usage: python main.py <youtube_url>
+# Usage: python main.py <youtube_url>   (queue one video and run the worker)
+#        python main.py                 (just run the worker, draining the queue)
 import sys
-from core.url_validator import validate_url
 from core import state
 from core.job_runner import JobRunner
 
 if __name__ == '__main__':
-    url = sys.argv[1]
-    validate_url(url)           # raises on bad input
-    job_id = state.enqueue_job(url)
-    print(f"Job queued: {job_id}")
+    if len(sys.argv) > 1:
+        job_id = state.enqueue_job(sys.argv[1])
+        print(f"Job queued: {job_id}")
     runner = JobRunner()
-    runner.run()                # blocks until queue is drained
+    runner.run()                # blocks, processing the FIFO queue one job at a time
 ```
+
+Multiple videos can be queued (via repeated CLI calls or the web UI) before
+or while the worker is running — they process sequentially in submission
+order.
 
 ---
 
@@ -346,35 +345,32 @@ One commit per module. Test before committing.
 - Full directory tree, empty `__init__.py` files, stub functions with docstrings
 - `requirements.txt`, `.gitignore`, `pytest.ini`, `.env.example`, `config/settings.yaml`
 
-**Phase B — Core + Processing:**
-1. `core/state.py` — all SQLite ops (create tables, enqueue, read/write job/clip/post state)
-2. `core/job_states.py` — `JobState` enum, valid transition map, `assert_valid_transition()`
+**Phase B — Download queue (current scope):**
+1. `core/state.py` — JSON read/write for job state (queued/downloading/complete/failed/cancelled)
+2. `core/job_states.py` — `JobState` enum (`QUEUED`, `DOWNLOADING`, `COMPLETE`, `FAILED`, `CANCELLED`), valid transition map
 3. `core/url_validator.py` — regex check + yt-dlp `extract_info` preflight
 4. `processing/downloader.py` — yt-dlp download to `data/jobs/<id>/raw/`
-5. `processing/transcriber.py` — mlx-whisper → `[{start, end, text}]`
-6. `processing/clip_detector.py` — 5-signal scorer → ranked `(start_s, end_s, score)` list
-7. `processing/editor.py` — ffprobe aspect check, smart crop or center crop to 9:16
-8. `processing/caption_burner.py` — ffmpeg `subtitles` filter burn-in
-9. `processing/formatter.py` — final encode, enforce 60s cap and 50MB size limit
-10. `core/job_runner.py` — wires stages 4–9, crash recovery, disk-space check
+5. `core/job_runner.py` — FIFO worker: pre-flight → download → complete, crash recovery, disk-space check
 
-**Phase C — Posting:**
-11. `posting/youtube.py` — YouTube Data API v3, resumable upload to Shorts
-12. `posting/tiktok.py` — TikTok Content Posting API
-13. `posting/instagram.py` — Instagram Graph API Reels upload
-14. Wire `post_all()` into `job_runner.py` after formatting
+Deliverable: submit any number of YouTube URLs, the worker downloads them
+one at a time into `data/jobs/<id>/raw/`, and a job is `complete` once its
+file is on disk and ready for the next workflow to read.
 
-**Phase D — Entry point + integration:**
-15. `main.py` — CLI glue, end-to-end smoke test
+**Phase C — Clip curation + posting (later, needs research first):**
+- `processing/transcriber.py`, `clip_detector.py`, `editor.py`,
+  `caption_burner.py`, `formatter.py` — exist in the repo as a design
+  sketch only; not wired into anything yet.
+- `posting/youtube.py`, `tiktok.py`, `instagram.py` — stubs, untouched.
+- This becomes its own workflow that reads completed jobs' downloaded files,
+  once we've researched what actually makes a good clip.
 
 ---
 
-## 13. Definition of Done
+## 13. Definition of Done (Phase B scope)
 
-- [ ] `python main.py <url>` runs end-to-end without errors
-- [ ] 3 clips produced for a 30-minute test video
-- [ ] All 3 clips auto-posted to YouTube Shorts, TikTok, and Instagram Reels
-- [ ] Worker survives `kill -9` mid-job and resumes correctly
-- [ ] Bad URLs (private, live, non-YT) rejected cleanly
+- [ ] `python main.py <url>` queues a video and the worker downloads it without errors
+- [ ] Multiple URLs queued back-to-back all process sequentially, FIFO, without blocking submission
+- [ ] Worker survives `kill -9` mid-download and resumes correctly
+- [ ] Bad URLs (private, live, non-YT) rejected cleanly at pre-flight
+- [ ] Downloaded file is kept on disk (not cleaned up) once the job is `complete`
 - [ ] All pytest suites pass
-- [ ] Raw downloads cleaned up after job completion
