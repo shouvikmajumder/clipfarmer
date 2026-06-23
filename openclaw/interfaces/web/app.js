@@ -1,5 +1,5 @@
 /**
- * Client-side logic for the OpenClaw job submission form.
+ * Client-side logic for the clipfarmer.bot job submission form.
  *
  * Performs a lightweight URL shape check (not full YouTube validation —
  * that lives in core/url_validator.py), POSTs to /api/jobs, and renders a

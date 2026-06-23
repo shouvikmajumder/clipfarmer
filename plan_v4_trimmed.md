@@ -1,4 +1,4 @@
-# OpenClaw v4 — Trimmed Build Plan
+# clipfarmer.bot v4 — Trimmed Build Plan
 > Core goal: **URL in → process → clips out → auto-post to YouTube Shorts, TikTok, Instagram Reels**
 > Supersedes v3. Everything that doesn't serve that goal is removed.
 

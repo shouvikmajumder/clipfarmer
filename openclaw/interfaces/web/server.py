@@ -1,4 +1,4 @@
-"""Minimal Flask server for the OpenClaw web submission form.
+"""Minimal Flask server for the clipfarmer.bot web submission form.
 
 Serves a single static HTML page (``index.html``) and exposes one POST
 endpoint, ``/api/jobs``, that accepts a YouTube URL and enqueues it via
