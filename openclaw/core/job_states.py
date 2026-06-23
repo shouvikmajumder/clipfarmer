@@ -3,6 +3,11 @@
 ``JobState`` is the single source of truth for what states a job may be in.
 ``VALID_TRANSITIONS`` encodes which state changes are legal, preventing bugs
 where a job skips stages or moves backwards unexpectedly.
+
+Scope note: this pipeline's only job is to turn a submitted URL into a
+downloaded video file on disk (see ``core.job_runner``). Clip curation and
+posting are a separate, future downstream workflow and are not represented
+in this state machine.
 """
 
 from __future__ import annotations
@@ -15,12 +20,6 @@ class JobState(str, Enum):
 
     QUEUED = "queued"
     DOWNLOADING = "downloading"
-    TRANSCRIBING = "transcribing"
-    DETECTING = "detecting"
-    EDITING = "editing"
-    CAPTIONING = "captioning"
-    FORMATTING = "formatting"
-    POSTING = "posting"
     COMPLETE = "complete"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -28,13 +27,7 @@ class JobState(str, Enum):
 
 VALID_TRANSITIONS: dict[JobState, list[JobState]] = {
     JobState.QUEUED: [JobState.DOWNLOADING, JobState.FAILED, JobState.CANCELLED],
-    JobState.DOWNLOADING: [JobState.TRANSCRIBING, JobState.FAILED, JobState.CANCELLED],
-    JobState.TRANSCRIBING: [JobState.DETECTING, JobState.FAILED, JobState.CANCELLED],
-    JobState.DETECTING: [JobState.EDITING, JobState.FAILED, JobState.CANCELLED],
-    JobState.EDITING: [JobState.CAPTIONING, JobState.FAILED, JobState.CANCELLED],
-    JobState.CAPTIONING: [JobState.FORMATTING, JobState.FAILED, JobState.CANCELLED],
-    JobState.FORMATTING: [JobState.POSTING, JobState.FAILED, JobState.CANCELLED],
-    JobState.POSTING: [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED],
+    JobState.DOWNLOADING: [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED],
     JobState.COMPLETE: [],
     JobState.FAILED: [JobState.QUEUED],  # Allow re-queuing a failed job.
     JobState.CANCELLED: [],

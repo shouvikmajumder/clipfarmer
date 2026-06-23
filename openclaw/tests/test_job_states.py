@@ -5,28 +5,16 @@ import pytest
 from core.job_states import JobState, VALID_TRANSITIONS, assert_valid_transition
 
 
-# Linear pipeline order per plan_v4_trimmed.md section 4.
+# Linear pipeline order per plan_v4_trimmed.md section 4 (download-only scope).
 PIPELINE_ORDER = [
     JobState.QUEUED,
     JobState.DOWNLOADING,
-    JobState.TRANSCRIBING,
-    JobState.DETECTING,
-    JobState.EDITING,
-    JobState.CAPTIONING,
-    JobState.FORMATTING,
-    JobState.POSTING,
     JobState.COMPLETE,
 ]
 
 NON_TERMINAL_STATES = [
     JobState.QUEUED,
     JobState.DOWNLOADING,
-    JobState.TRANSCRIBING,
-    JobState.DETECTING,
-    JobState.EDITING,
-    JobState.CAPTIONING,
-    JobState.FORMATTING,
-    JobState.POSTING,
 ]
 
 TERMINAL_STATES = [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED]
@@ -67,15 +55,15 @@ def test_terminal_states_have_no_outgoing_transitions_except_failed_requeue(term
 
 
 def test_skipping_a_stage_is_invalid():
-    """Jumping ahead in the pipeline (e.g. queued -> transcribing) must raise."""
+    """Jumping ahead in the pipeline (e.g. queued -> complete) must raise."""
     with pytest.raises(ValueError):
-        assert_valid_transition(JobState.QUEUED, JobState.TRANSCRIBING)
+        assert_valid_transition(JobState.QUEUED, JobState.COMPLETE)
 
 
 def test_moving_backwards_is_invalid():
     """Moving backwards in the pipeline must raise."""
     with pytest.raises(ValueError):
-        assert_valid_transition(JobState.EDITING, JobState.DOWNLOADING)
+        assert_valid_transition(JobState.COMPLETE, JobState.DOWNLOADING)
 
 
 def test_transition_from_complete_is_invalid():
