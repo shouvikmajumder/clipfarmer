@@ -1,8 +1,8 @@
 """Minimal Flask server for the clipfarmer.bot web submission form.
 
-Serves a single static HTML page (``index.html``) and exposes one POST
-endpoint, ``/api/jobs``, that accepts a YouTube URL and enqueues it via
-``core.state.enqueue_job``.
+Serves the single-page HTML form along with its CSS/JS assets, and exposes
+one POST endpoint, ``/api/jobs``, that accepts a YouTube URL and enqueues it
+via ``core.state.enqueue_job``.
 
 This module is an *alternative* entry point to the existing CLI
 (``python main.py <url>``). It does not implement any job processing logic
@@ -45,6 +45,18 @@ app = Flask(__name__, static_folder=None)
 def index():
     """Serve the single-page web form."""
     return send_from_directory(STATIC_DIR, "index.html")
+
+
+@app.route("/<path:filename>")
+def static_asset(filename):
+    """Serve the form's CSS/JS assets (style.css, app.js) alongside index.html.
+
+    Restricted to the known asset filenames so this can't be used as a
+    generic directory-traversal-style file server for the rest of the repo.
+    """
+    if filename not in {"style.css", "app.js"}:
+        return jsonify(error="Not found"), 404
+    return send_from_directory(STATIC_DIR, filename)
 
 
 @app.route("/api/jobs", methods=["POST"])
