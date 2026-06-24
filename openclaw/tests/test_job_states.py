@@ -5,16 +5,18 @@ import pytest
 from core.job_states import JobState, VALID_TRANSITIONS, assert_valid_transition
 
 
-# Linear pipeline order per plan_v4_trimmed.md section 4 (download-only scope).
+# Linear pipeline order: queued → downloading → detecting → complete.
 PIPELINE_ORDER = [
     JobState.QUEUED,
     JobState.DOWNLOADING,
+    JobState.DETECTING,
     JobState.COMPLETE,
 ]
 
 NON_TERMINAL_STATES = [
     JobState.QUEUED,
     JobState.DOWNLOADING,
+    JobState.DETECTING,
 ]
 
 TERMINAL_STATES = [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED]
@@ -27,6 +29,22 @@ TERMINAL_STATES = [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED]
 def test_linear_pipeline_transitions_are_valid(current, expected_next):
     """Every forward step in the linear pipeline should be a legal transition."""
     assert_valid_transition(current, expected_next)  # should not raise
+
+
+def test_downloading_to_detecting_is_valid():
+    """The new second pipeline stage must be reachable from downloading."""
+    assert_valid_transition(JobState.DOWNLOADING, JobState.DETECTING)  # should not raise
+
+
+def test_detecting_to_complete_is_valid():
+    """The new second pipeline stage must transition cleanly to complete."""
+    assert_valid_transition(JobState.DETECTING, JobState.COMPLETE)  # should not raise
+
+
+def test_downloading_to_complete_is_invalid():
+    """Skipping the detecting stage (downloading → complete) must now be rejected."""
+    with pytest.raises(ValueError):
+        assert_valid_transition(JobState.DOWNLOADING, JobState.COMPLETE)
 
 
 @pytest.mark.parametrize("state", NON_TERMINAL_STATES)
