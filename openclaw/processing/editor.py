@@ -1,121 +1,261 @@
-"""Video editing stage: trim and crop source footage to 9:16 vertical format.
+"""Profile-based vertical-video editor: trim source footage and composite it
+to 9:16 (608x1080) using one of several layout profiles.
 
-Uses ``ffmpeg-python`` (lazily imported) to first trim the clip to
-``[start_s, end_s]``, then crop/scale it to a 9:16 vertical frame. ``ffprobe``
-is run first to check the input's aspect ratio: if it is already
-approximately 9:16 (within ``ASPECT_TOLERANCE``), the crop step is skipped and
-the source is simply trimmed + rescaled to the target resolution. Otherwise a
-horizontal center-crop is applied before scaling (v1 — no face detection;
-that is a stretch goal per the build plan).
+Profiles
+--------
+- **podcast** / **default**: zoom + center-crop + scale; good for talking-head
+  footage where the subject is centered.
+- **interview**: same zoom/crop but lets the caller shift the crop window left
+  or right so an off-center speaker stays in frame.
+- **irl**: podcast pipeline plus a subtle contrast/saturation boost via the
+  ``eq`` filter.
+- **gaming**: blurred full-frame background with gameplay centred on top, plus
+  a small facecam cutout overlaid at the bottom-right corner.
 
-On any ffmpeg/ffprobe failure this module raises; it does not retry or fall
-back internally. ``core/job_runner.py`` is responsible for the
-"skip this clip, continue others" retry/fallback policy described in
-``plan_v4_trimmed.md`` section 11.
+``build_filter_args`` and ``build_ffmpeg_cmd`` are pure functions — they build
+CLI argument lists without touching the filesystem or spawning any process.
+This makes them trivially unit-testable without a real FFmpeg binary.
+
+``edit_clip`` is the only impure entry-point.  It is idempotent: if the output
+file already exists and is non-empty it returns immediately without invoking
+FFmpeg.  Per-clip retry/skip policy lives in the caller (``core/job_runner.py``),
+matching the approach described in the v4 plan.
 """
 
 from __future__ import annotations
 
-# Target vertical resolution (9:16).
-TARGET_WIDTH = 1080
-TARGET_HEIGHT = 1920
-TARGET_ASPECT = TARGET_WIDTH / TARGET_HEIGHT  # 0.5625
+import logging
+import os
 
-# How far off 9:16 the source aspect ratio may be before we still treat it as
-# "already vertical" and skip the smart/center-crop step.
-ASPECT_TOLERANCE = 0.02
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Target resolution (9:16 at 1080p short-form vertical)
+# ---------------------------------------------------------------------------
+TARGET_WIDTH = 608
+TARGET_HEIGHT = 1080
+
+# ---------------------------------------------------------------------------
+# Horizontal crop-bias expressions for the interview profile.
+# These are FFmpeg expression strings for the x-offset argument of the crop
+# filter, where ow is the crop output width.
+# ---------------------------------------------------------------------------
+CROP_BIAS = {
+    "left": "0",
+    "center": "(iw-ow)/2",
+    "right": "iw-ow",
+}
+
+# ---------------------------------------------------------------------------
+# Default facecam region for the gaming profile, expressed as ratios of the
+# source video's width/height.  Callers may override this per-clip.
+# ---------------------------------------------------------------------------
+DEFAULT_FACECAM_REGION: dict[str, float] = {
+    "width_ratio": 0.25,
+    "height_ratio": 0.35,
+    "x_ratio": 0.75,
+    "y_ratio": 0.65,
+}
 
 
-def _probe_dimensions(input_path: str) -> tuple[int, int]:
-    """Return ``(width, height)`` of the first video stream in *input_path*.
+def build_filter_args(
+    profile: str,
+    crop_bias: str = "center",
+    facecam_region: dict | None = None,
+) -> list[str]:
+    """Return FFmpeg filter CLI args for *profile*.
 
-    Raises:
-        RuntimeError: If ffprobe fails or no video stream is found.
-    """
-    import ffmpeg
+    For simple profiles the return value is ``["-vf", "<filter_chain>"]``.
+    For the gaming profile it is
+    ``["-filter_complex", "<fc>", "-map", "[vout]", "-map", "0:a?"]``.
 
-    try:
-        probe = ffmpeg.probe(input_path)
-    except ffmpeg.Error as exc:
-        stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
-        raise RuntimeError(f"ffprobe failed for {input_path!r}: {stderr}") from exc
-
-    video_streams = [s for s in probe.get("streams", []) if s.get("codec_type") == "video"]
-    if not video_streams:
-        raise RuntimeError(f"No video stream found in {input_path!r}")
-
-    stream = video_streams[0]
-    width = int(stream["width"])
-    height = int(stream["height"])
-    return width, height
-
-
-def crop_to_vertical(input_path: str, start_s: float, end_s: float, output_path: str) -> str:
-    """Trim *input_path* to ``[start_s, end_s]`` and crop/scale it to 9:16.
-
-    Contract:
-    1. Probe the input's video stream dimensions via ffprobe.
-    2. If the source aspect ratio is already within ``ASPECT_TOLERANCE`` of
-       9:16, skip cropping — just trim and rescale to ``1080x1920``.
-    3. Otherwise, apply a horizontal center-crop (the widest centered region
-       whose aspect ratio is exactly 9:16 relative to the source height),
-       then scale to ``1080x1920``.
-    4. Write the result to *output_path*, overwriting if it exists.
+    Profile lookup is case-insensitive.  ``None`` or any unknown string falls
+    back to ``"default"``.
 
     Args:
-        input_path: Absolute path to the source video file.
-        start_s: Clip start time in seconds (within the source video).
-        end_s: Clip end time in seconds (within the source video).
-        output_path: Absolute path to write the cropped/trimmed output to.
+        profile:       One of ``podcast``, ``interview``, ``gaming``, ``irl``,
+                       ``default`` (case-insensitive).  Unknown values treated
+                       as ``"default"``.
+        crop_bias:     For the ``interview`` profile only.  One of ``"left"``,
+                       ``"center"`` (default), or ``"right"``.  Unknown values
+                       fall back to ``"center"``.
+        facecam_region: For the ``gaming`` profile only.  Dict with keys
+                        ``width_ratio``, ``height_ratio``, ``x_ratio``,
+                        ``y_ratio`` (all floats, ratios of source dimensions).
+                        Defaults to ``DEFAULT_FACECAM_REGION``.
+
+    Returns:
+        A list of strings ready to be spliced into an FFmpeg command.
+    """
+    # Normalise profile: None or unknown → "default"
+    normalised = (profile or "default").lower().strip()
+    known = {"podcast", "interview", "gaming", "irl", "default"}
+    if normalised not in known:
+        normalised = "default"
+
+    if normalised in ("podcast", "default"):
+        # Zoom in 15% to add headroom, then center-crop to exact 9:16
+        # (FFmpeg's crop centers by default when x/y are omitted), then scale
+        # to the 608x1080 target.
+        vf = "scale=iw*1.15:ih*1.15,crop=ih*9/16:ih,scale=608:1080"
+        return ["-vf", vf]
+
+    if normalised == "interview":
+        # Same zoom as podcast, but the crop x-offset is controlled by
+        # crop_bias so an off-center speaker stays in frame.
+        xbias = CROP_BIAS.get(crop_bias, CROP_BIAS["center"])
+        vf = f"scale=iw*1.15:ih*1.15,crop=ih*9/16:ih:{xbias}:0,scale=608:1080"
+        return ["-vf", vf]
+
+    if normalised == "irl":
+        # Podcast pipeline plus a subtle contrast/saturation boost via the eq
+        # filter, which helps outdoor/run-and-gun footage look more polished.
+        vf = (
+            "scale=iw*1.15:ih*1.15,"
+            "crop=ih*9/16:ih,"
+            "scale=608:1080,"
+            "eq=contrast=1.05:saturation=1.15"
+        )
+        return ["-vf", vf]
+
+    # gaming — filter_complex with three layers:
+    #   Layer 1 [bg]:   blurred full-frame fill so no black bars appear
+    #   Layer 2 [base]: gameplay video fit to 608 width, centered on the fill
+    #   Layer 3 [vout]: facecam sub-rectangle (~182 px wide) overlaid
+    #                   bottom-right with a 20 px inset margin
+    region = facecam_region if facecam_region is not None else DEFAULT_FACECAM_REGION
+    w = region["width_ratio"]
+    h = region["height_ratio"]
+    x = region["x_ratio"]
+    y = region["y_ratio"]
+
+    # Build as a single semicolon-separated filter_complex string.
+    # [bg]:   scale to at-least 608x1080, hard-crop to exactly 608x1080, then
+    #         apply a Gaussian blur (sigma=20) so edges look intentional.
+    # [fg]:   scale gameplay to 608 px wide, preserving aspect ratio.
+    # overlay [base]: centre the gameplay over the blurred fill.
+    # [cam]:  crop the facecam region from the original input, scale to ~182 px.
+    # overlay [vout]: place the facecam at bottom-right with 20 px margins.
+    fc = (
+        f"[0:v]scale=608:1080:force_original_aspect_ratio=increase,"
+        f"crop=608:1080,gblur=sigma=20[bg];"
+        f"[0:v]scale=608:-2[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[base];"
+        f"[0:v]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale=182:-2[cam];"
+        f"[base][cam]overlay=W-w-20:H-h-20[vout]"
+    )
+    return ["-filter_complex", fc, "-map", "[vout]", "-map", "0:a?"]
+
+
+def build_ffmpeg_cmd(
+    input_path: str,
+    start_s: float,
+    end_s: float,
+    output_path: str,
+    profile: str = "default",
+    crop_bias: str = "center",
+    facecam_region: dict | None = None,
+) -> list[str]:
+    """Return the full FFmpeg command as a list of argument strings.
+
+    Pure — no I/O, no subprocesses.
+
+    Args:
+        input_path:    Absolute path to the source video file.
+        start_s:       Clip start time in seconds within the source video.
+        end_s:         Clip end time in seconds within the source video.
+        output_path:   Absolute path to write the processed output to.
+        profile:       Layout profile (see ``build_filter_args``).
+        crop_bias:     Horizontal crop bias for the ``interview`` profile.
+        facecam_region: Facecam region overrides for the ``gaming`` profile.
+
+    Returns:
+        A list ready to pass directly to ``subprocess.run``.
+
+    Raises:
+        ValueError: If ``end_s <= start_s``.
+    """
+    if end_s <= start_s:
+        raise ValueError(
+            f"end_s ({end_s}) must be greater than start_s ({start_s})"
+        )
+
+    filter_args = build_filter_args(profile, crop_bias=crop_bias, facecam_region=facecam_region)
+    duration = end_s - start_s
+
+    return [
+        "ffmpeg",
+        "-y",
+        "-ss", f"{start_s:.3f}",
+        "-i", input_path,
+        "-t", f"{duration:.3f}",
+        *filter_args,
+        "-c:v", "h264_videotoolbox",
+        "-b:v", "8M",
+        "-c:a", "aac",
+        output_path,
+    ]
+
+
+def edit_clip(
+    input_path: str,
+    start_s: float,
+    end_s: float,
+    output_path: str,
+    profile: str = "default",
+    crop_bias: str = "center",
+    facecam_region: dict | None = None,
+) -> str:
+    """Trim and reformat *input_path* to 9:16 using the given *profile*.
+
+    This is the only impure function in this module.  It is idempotent: if
+    *output_path* already exists and is non-empty, FFmpeg is skipped and
+    *output_path* is returned immediately (safe to retry a partially-completed
+    job).
+
+    Args:
+        input_path:    Absolute path to the source video file.
+        start_s:       Clip start time in seconds.
+        end_s:         Clip end time in seconds.
+        output_path:   Absolute path to write the processed output to.
+        profile:       Layout profile passed to ``build_filter_args``.
+        crop_bias:     Horizontal crop bias for the ``interview`` profile.
+        facecam_region: Facecam region overrides for the ``gaming`` profile.
 
     Returns:
         *output_path*, unchanged, for convenient chaining.
 
     Raises:
-        ValueError: If ``end_s <= start_s``.
-        RuntimeError: If ffprobe or ffmpeg fails (e.g. corrupt input, ffmpeg
-            binary missing, unsupported codec). Callers are responsible for
-            any retry/fallback policy — this function does not swallow
-            errors.
+        ValueError:   If ``end_s <= start_s`` (propagated from
+                      ``build_ffmpeg_cmd``).
+        RuntimeError: If FFmpeg exits with a non-zero return code.
     """
-    import ffmpeg
+    import subprocess
 
-    if end_s <= start_s:
-        raise ValueError(f"end_s ({end_s}) must be greater than start_s ({start_s})")
-
-    width, height = _probe_dimensions(input_path)
-    source_aspect = width / height
-    duration = end_s - start_s
-
-    stream = ffmpeg.input(input_path, ss=start_s, t=duration)
-
-    if abs(source_aspect - TARGET_ASPECT) <= ASPECT_TOLERANCE:
-        # Already ~9:16 — skip smart/center crop, just rescale.
-        video = stream.video.filter("scale", TARGET_WIDTH, TARGET_HEIGHT)
-    else:
-        # Center-crop to a 9:16 region of the source, then scale.
-        crop_width = int(height * TARGET_ASPECT)
-        if crop_width > width:
-            # Source is narrower than 9:16 (unusually tall) — crop height instead.
-            crop_height = int(width / TARGET_ASPECT)
-            crop_height = min(crop_height, height)
-            y_offset = max(0, (height - crop_height) // 2)
-            video = stream.video.filter("crop", width, crop_height, 0, y_offset)
-        else:
-            x_offset = max(0, (width - crop_width) // 2)
-            video = stream.video.filter("crop", crop_width, height, x_offset, 0)
-        video = video.filter("scale", TARGET_WIDTH, TARGET_HEIGHT)
-
-    audio = stream.audio
-
-    try:
-        (
-            ffmpeg.output(video, audio, output_path)
-            .overwrite_output()
-            .run(capture_stdout=True, capture_stderr=True)
+    # Cache guard: idempotent retry — skip FFmpeg if output already exists.
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        logger.info(
+            "edit_clip: cache hit, skipping FFmpeg for %r (profile=%r)",
+            output_path,
+            profile,
         )
-    except ffmpeg.Error as exc:
-        stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
-        raise RuntimeError(f"ffmpeg crop/trim failed for {input_path!r}: {stderr}") from exc
+        return output_path
+
+    cmd = build_ffmpeg_cmd(
+        input_path,
+        start_s,
+        end_s,
+        output_path,
+        profile=profile,
+        crop_bias=crop_bias,
+        facecam_region=facecam_region,
+    )
+
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"ffmpeg editing failed for {input_path!r} (profile={profile!r}): {stderr}"
+        )
 
     return output_path

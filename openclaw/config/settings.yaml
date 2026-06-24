@@ -60,3 +60,17 @@ posting:
     - tiktok
     - instagram
   max_retries: 3
+
+editing:
+  # Layout profile applied to every clip.
+  # Valid values: podcast, interview, gaming, irl, default
+  default_profile: default
+
+gaming:
+  # Facecam crop as ratios of input width/height, overlaid bottom-right for
+  # the gaming profile.
+  facecam_region:
+    width_ratio: 0.25
+    height_ratio: 0.35
+    x_ratio: 0.75
+    y_ratio: 0.65
