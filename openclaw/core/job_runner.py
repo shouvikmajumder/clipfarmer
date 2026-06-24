@@ -7,8 +7,14 @@ resumption: if a job's ``last_stage_completed`` is set, execution picks up
 from the next uncompleted stage rather than starting over.
 
 Pipeline stage order (mirrors ``core.job_states.JobState``):
-    downloading -> transcribing -> detecting -> editing -> captioning ->
+    downloading -> detecting -> editing -> captioning ->
     formatting -> posting -> complete
+
+The detecting stage fetches the YouTube transcript, comments, and audio
+signals in parallel, then runs clip detection over all three sources.
+Whisper transcription runs per-clip inside the captioning stage (against
+the already-edited, already-t=0-relative clip file) using the smaller
+``worker.clip_whisper_model`` model.
 
 Per-clip failure isolation: a single clip failing at the editing or
 captioning stage is logged and skipped; the rest of the pipeline continues
@@ -69,7 +75,6 @@ class JobRunner:
     # ``process()`` and to compute crash-recovery resume points.
     STAGE_ORDER: list[str] = [
         "downloading",
-        "transcribing",
         "detecting",
         "editing",
         "captioning",
@@ -183,8 +188,8 @@ class JobRunner:
         method returns immediately without touching the stage pipeline.
 
         Any unhandled exception raised by a *required* stage (downloading,
-        transcribing, detecting, formatting) marks the job failed and
-        returns — it does not propagate, so the worker loop keeps running.
+        detecting, formatting) marks the job failed and returns — it does
+        not propagate, so the worker loop keeps running.
         Editing/captioning isolate failures per-clip instead (see module
         docstring). Posting is always best-effort and never fails the job.
 
@@ -223,7 +228,6 @@ class JobRunner:
         formatting_idx = self.STAGE_ORDER.index("formatting")
 
         video_path: str | None = None
-        segments: list[dict] = []
         clip_windows: list[dict] = []
         edited_clips: list[dict] = []
         captioned_clips: list[dict] = []
@@ -248,22 +252,17 @@ class JobRunner:
             state.mark_job_complete(job_id)
             return
 
-        # Crash-resume case: if we're skipping straight past downloading
-        # and/or transcribing (already marked complete on disk from a prior
-        # run), their in-memory artifacts (video_path/segments) are gone —
-        # later stages need them, so recompute. download() and transcribe()
-        # are both safe to re-run (download is a cache-checked no-op if the
-        # file already exists on disk via yt-dlp's overwrite skip; transcribe
-        # is read-only against that file), so this trades a bit of redundant
-        # work for correctness after a crash.
+        # Crash-resume case: if we're skipping past downloading (already
+        # marked complete on disk from a prior run), video_path is gone from
+        # memory — later stages (detecting, editing, captioning) still need
+        # it.  Re-running download() is safe: yt-dlp skips the download if
+        # the file already exists on disk.
         if start_idx > self.STAGE_ORDER.index("downloading"):
             if not self._has_enough_disk_space(job_id):
                 return
             video_path = self._download(job)
-        if start_idx > self.STAGE_ORDER.index("transcribing"):
-            segments = self._transcribe(video_path, job)
         if start_idx > self.STAGE_ORDER.index("detecting"):
-            clip_windows = self._detect_clips(segments, job)
+            clip_windows = self._detect(video_path, job)
             if not clip_windows:
                 state.mark_job_failed(job_id, "no clips met the score threshold")
                 return
@@ -273,7 +272,7 @@ class JobRunner:
                 state.mark_job_failed(job_id, "all clips failed during editing")
                 return
         if start_idx > self.STAGE_ORDER.index("captioning"):
-            captioned_clips = self._add_captions(job, edited_clips, segments)
+            captioned_clips = self._add_captions(job, edited_clips)
             if not captioned_clips:
                 state.mark_job_failed(job_id, "all clips failed during captioning")
                 return
@@ -285,10 +284,8 @@ class JobRunner:
                 if not self._has_enough_disk_space(job_id):
                     return
                 video_path = self._download(job)
-            elif stage_name == "transcribing":
-                segments = self._transcribe(video_path, job)
             elif stage_name == "detecting":
-                clip_windows = self._detect_clips(segments, job)
+                clip_windows = self._detect(video_path, job)
                 if not clip_windows:
                     state.mark_job_failed(
                         job_id, "no clips met the score threshold"
@@ -302,7 +299,7 @@ class JobRunner:
                     )
                     return
             elif stage_name == "captioning":
-                captioned_clips = self._add_captions(job, edited_clips, segments)
+                captioned_clips = self._add_captions(job, edited_clips)
                 if not captioned_clips:
                     state.mark_job_failed(
                         job_id, "all clips failed during captioning"
@@ -376,18 +373,67 @@ class JobRunner:
 
         return download(job)
 
-    def _transcribe(self, video_path: str, job: dict) -> list[dict]:
-        """Transcribe *video_path* and return segment dicts."""
-        from processing.transcriber import transcribe
+    def _detect(self, video_path: str, job: dict) -> list[dict]:
+        """Fetch transcript, comments, and audio signals in parallel; run clip detection.
 
-        return transcribe(video_path)
+        All three data sources are fetched concurrently via a
+        ``ThreadPoolExecutor``.  Any individual source failing is treated as
+        unavailable (``None`` / ``[]``) rather than aborting the whole job —
+        the detector degrades gracefully when any signal is absent.
 
-    def _detect_clips(self, segments: list[dict], job: dict) -> list[dict]:
-        """Run clip detection over *segments* and return candidate windows."""
-        from processing.clip_detector import detect_clips
+        Args:
+            video_path: Local path to the downloaded source video (needed for
+                        audio analysis).
+            job:        Job metadata dict; used for ``youtube_id`` and
+                        ``options.max_clips``.
+
+        Returns:
+            List of ``{"start_s", "end_s", "score"}`` clip-window dicts,
+            sorted by score descending.  May be empty.
+        """
+        import concurrent.futures
+
+        from processing.clip_detector import detect
+        from processing.transcript_fetcher import fetch_transcript
+        from processing.comments import fetch_comments
+        from processing.audio_analyzer import AudioSignals
+
+        youtube_id = job.get("youtube_id")
+
+        transcript: list[dict] | None = None
+        comments: list[dict] = []
+        audio: AudioSignals | None = None
+
+        def _fetch_audio() -> AudioSignals | None:
+            try:
+                return AudioSignals.from_file(video_path)
+            except (RuntimeError, ModuleNotFoundError, Exception) as exc:
+                logger.warning(
+                    "Job %s: audio analysis failed, continuing without audio signals: %s",
+                    job["id"],
+                    exc,
+                )
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_transcript = executor.submit(fetch_transcript, youtube_id)
+            future_comments = executor.submit(fetch_comments, youtube_id)
+            future_audio = executor.submit(_fetch_audio)
+
+            transcript = future_transcript.result()
+            comments = future_comments.result()
+            audio = future_audio.result()
+
+        logger.info(
+            "Job %s: detect stage — transcript=%s, comments=%d, audio=%s",
+            job["id"],
+            "found" if transcript else "not found",
+            len(comments),
+            "ok" if audio is not None else "unavailable",
+        )
 
         max_clips = (job.get("options") or {}).get("max_clips", self.default_max_clips)
-        return detect_clips(segments, max_clips=max_clips)
+        return detect(transcript, comments=comments, audio_signals=audio, max_clips=max_clips)
 
     def _edit(
         self, job: dict, video_path: str, clip_windows: list[dict]
@@ -427,30 +473,48 @@ class JobRunner:
 
         return edited
 
-    def _add_captions(
-        self, job: dict, edited_clips: list[dict], segments: list[dict]
-    ) -> list[dict]:
-        """Burn captions into each edited clip.
+    def _add_captions(self, job: dict, edited_clips: list[dict]) -> list[dict]:
+        """Transcribe each edited clip with Whisper and burn captions into it.
 
-        Slices and rebases ``segments`` to each clip's own ``[start_s,
-        end_s]`` window before handing them to ``caption_burner.burn_captions``
-        (its contract requires segments relative to t=0 of the clip, not the
-        source video). Same per-clip failure isolation as ``_edit``.
+        Each edited clip file is already t=0-relative (it starts at second 0),
+        so the segments returned by ``transcribe`` can be passed directly to
+        ``burn_captions`` without any slice/rebase step.  Uses the smaller
+        ``worker.clip_whisper_model`` (default ``"base"``) rather than the
+        full-video model, keeping per-clip transcription fast.
+
+        Same per-clip failure isolation as ``_edit``: a single clip failing
+        transcription or caption burning is logged and skipped; the remaining
+        clips continue.
+
+        Args:
+            job:         Job metadata dict.
+            edited_clips: List of clip dicts carrying ``edited_path`` and
+                          ``index`` (as returned by ``_edit``).
+
+        Returns:
+            List of clip dicts augmented with ``captioned_path`` and
+            ``transcript_snippet``.
         """
+        from processing.transcriber import transcribe
         from processing.caption_burner import burn_captions
 
         job_id = job["id"]
         clips_dir = state.JOBS_DIR / job_id / "clips"
 
+        # Read the clip-level Whisper model once for all clips in this job.
+        settings = _load_settings()
+        clip_model: str = (settings.get("worker") or {}).get(
+            "clip_whisper_model", "base"
+        )
+
         captioned: list[dict] = []
         for clip in edited_clips:
             idx = clip["index"]
-            start_s = clip["start_s"]
-            end_s = clip["end_s"]
-            clip_segments = self._slice_and_rebase_segments(segments, start_s, end_s)
-
             output_path = str(clips_dir / f"captioned_{idx}.mp4")
             try:
+                # The edited clip already starts at t=0, so Whisper segments
+                # are clip-relative by construction — no rebasing needed.
+                clip_segments = transcribe(clip["edited_path"], model_name=clip_model)
                 burn_captions(clip["edited_path"], clip_segments, output_path)
             except Exception as exc:  # noqa: BLE001 - isolate per-clip failures
                 logger.error(
@@ -471,28 +535,6 @@ class JobRunner:
             )
 
         return captioned
-
-    @staticmethod
-    def _slice_and_rebase_segments(
-        segments: list[dict], start_s: float, end_s: float
-    ) -> list[dict]:
-        """Filter *segments* to those overlapping ``[start_s, end_s]`` and rebase to t=0.
-
-        Per ``caption_burner.burn_captions``'s contract, segments passed to it
-        must have ``start``/``end`` relative to the start of the clip file,
-        not the original source video timeline.
-        """
-        sliced: list[dict] = []
-        for seg in segments:
-            seg_start = seg.get("start", 0.0) or 0.0
-            seg_end = seg.get("end", seg_start) or seg_start
-            if seg_end <= start_s or seg_start >= end_s:
-                continue
-            rebased = dict(seg)
-            rebased["start"] = max(0.0, seg_start - start_s)
-            rebased["end"] = max(0.0, seg_end - start_s)
-            sliced.append(rebased)
-        return sliced
 
     def _format_clips(self, job: dict, captioned_clips: list[dict]) -> list[dict]:
         """Final-encode each captioned clip and persist successful ones via state.add_clip.

@@ -3,6 +3,9 @@
 ``JobState`` is the single source of truth for what states a job may be in.
 ``VALID_TRANSITIONS`` encodes which state changes are legal, preventing bugs
 where a job skips stages or moves backwards unexpectedly.
+
+Pipeline stage order:
+    downloading -> detecting -> editing -> captioning -> formatting -> posting -> complete
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ class JobState(str, Enum):
 
     QUEUED = "queued"
     DOWNLOADING = "downloading"
-    TRANSCRIBING = "transcribing"
     DETECTING = "detecting"
     EDITING = "editing"
     CAPTIONING = "captioning"
@@ -28,8 +30,7 @@ class JobState(str, Enum):
 
 VALID_TRANSITIONS: dict[JobState, list[JobState]] = {
     JobState.QUEUED: [JobState.DOWNLOADING, JobState.FAILED, JobState.CANCELLED],
-    JobState.DOWNLOADING: [JobState.TRANSCRIBING, JobState.FAILED, JobState.CANCELLED],
-    JobState.TRANSCRIBING: [JobState.DETECTING, JobState.FAILED, JobState.CANCELLED],
+    JobState.DOWNLOADING: [JobState.DETECTING, JobState.FAILED, JobState.CANCELLED],
     JobState.DETECTING: [JobState.EDITING, JobState.FAILED, JobState.CANCELLED],
     JobState.EDITING: [JobState.CAPTIONING, JobState.FAILED, JobState.CANCELLED],
     JobState.CAPTIONING: [JobState.FORMATTING, JobState.FAILED, JobState.CANCELLED],
