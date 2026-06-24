@@ -99,3 +99,30 @@ def test_transcribe_does_not_require_mlx_whisper_importable_at_module_load():
     """Module-level import of transcriber must succeed even without mlx_whisper installed."""
     assert sys.modules.get("mlx_whisper") is None or True  # presence is irrelevant
     assert hasattr(transcriber, "transcribe")
+
+
+def test_transcribe_explicit_model_name_overrides_settings(mock_mlx_whisper):
+    """Passing model_name='base' must use that model instead of the settings value.
+
+    The settings.yaml has worker.whisper_model='medium', so without an override
+    the call would use 'medium'. Passing 'base' explicitly must bypass the
+    settings lookup and call mlx_whisper.transcribe with path_or_hf_repo='base'.
+    """
+    mock_mlx_whisper.return_value = {"segments": []}
+
+    transcriber.transcribe(VIDEO_PATH, model_name="base")
+
+    _, kwargs = mock_mlx_whisper.call_args
+    assert kwargs["path_or_hf_repo"] == "base"
+
+
+def test_transcribe_explicit_model_name_not_overridden_by_settings(mock_mlx_whisper):
+    """Passing model_name='tiny' must use 'tiny' even when settings say 'medium'."""
+    mock_mlx_whisper.return_value = {"segments": []}
+
+    transcriber.transcribe(VIDEO_PATH, model_name="tiny")
+
+    _, kwargs = mock_mlx_whisper.call_args
+    assert kwargs["path_or_hf_repo"] == "tiny"
+    # Confirm settings value was NOT used.
+    assert kwargs["path_or_hf_repo"] != "medium"
