@@ -194,6 +194,15 @@ class AudioSignals:
         )
 
     # ------------------------------------------------------------------
+    # Public properties
+    # ------------------------------------------------------------------
+
+    @property
+    def duration_s(self) -> float:
+        """Total duration of the loaded media file in seconds."""
+        return self._duration_s
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
