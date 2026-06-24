@@ -3,6 +3,9 @@
 Every processing-module function and every core.state function is mocked,
 so these tests never touch ffmpeg, yt-dlp, whisper, or the real filesystem
 beyond what pytest's ``tmp_path`` fixture provides.
+
+v5 pipeline stage order (TRANSCRIBING was removed):
+    downloading -> detecting -> editing -> captioning -> formatting -> posting
 """
 
 from __future__ import annotations
@@ -55,12 +58,21 @@ def _patch_pipeline(
     validate_url_side_effect=None,
     download_return="raw/video.mp4",
     transcribe_return=None,
-    detect_clips_return=None,
+    detect_return=None,
     crop_to_vertical_side_effect=None,
     burn_captions_side_effect=None,
     format_clip_side_effect=None,
 ):
-    """Build a dict of patch targets -> behaviours for the full pipeline."""
+    """Build a dict of patch targets -> behaviours for the full pipeline.
+
+    In the v5 pipeline:
+    - ``_detect`` (patched directly on the runner) replaces the old separate
+      _transcribe + _detect_clips pair. It returns CLIP_WINDOWS directly.
+    - ``processing.transcriber.transcribe`` is now used only inside
+      ``_add_captions`` (per edited clip), not in detecting.
+    - There is no longer a ``transcribing`` stage; detecting is the direct
+      successor of downloading.
+    """
     if validate_url_return is None and validate_url_side_effect is None:
         validate_url_return = {
             "youtube_id": "abc123",
@@ -69,8 +81,8 @@ def _patch_pipeline(
         }
     if transcribe_return is None:
         transcribe_return = SEGMENTS
-    if detect_clips_return is None:
-        detect_clips_return = CLIP_WINDOWS
+    if detect_return is None:
+        detect_return = CLIP_WINDOWS
 
     patches = {}
 
@@ -84,11 +96,14 @@ def _patch_pipeline(
     download_mock = MagicMock(return_value=download_return)
     patches["processing.downloader.download"] = download_mock
 
+    # _detect is patched directly so we don't need to mock transcript_fetcher,
+    # comments.fetch_comments, AudioSignals.from_file, or clip_detector.detect.
+    detect_mock = MagicMock(return_value=detect_return)
+    patches["core.job_runner.JobRunner._detect"] = detect_mock
+
+    # transcribe is called per clip inside _add_captions (captioning stage).
     transcribe_mock = MagicMock(return_value=transcribe_return)
     patches["processing.transcriber.transcribe"] = transcribe_mock
-
-    detect_clips_mock = MagicMock(return_value=detect_clips_return)
-    patches["processing.clip_detector.detect_clips"] = detect_clips_mock
 
     crop_mock = MagicMock(side_effect=crop_to_vertical_side_effect)
     if crop_to_vertical_side_effect is None:
@@ -123,6 +138,30 @@ def _apply_patches(patches: dict):
 def _stop_patches(ctxs):
     for ctx in ctxs:
         ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+# Stage order sanity check
+# ---------------------------------------------------------------------------
+
+
+def test_stage_order_has_no_transcribing(runner: JobRunner):
+    """v5 pipeline must not include a 'transcribing' stage."""
+    assert "transcribing" not in runner.STAGE_ORDER
+
+
+def test_stage_order_is_correct_v5_sequence(runner: JobRunner):
+    """v5 stage order: downloading -> detecting -> editing -> captioning ->
+    formatting -> posting.
+    """
+    assert runner.STAGE_ORDER == [
+        "downloading",
+        "detecting",
+        "editing",
+        "captioning",
+        "formatting",
+        "posting",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +226,7 @@ def test_preflight_rejection_cancels_job(runner: JobRunner):
 
 def test_zero_clips_detected_fails_job(runner: JobRunner):
     job = _make_job()
-    patches = _patch_pipeline(detect_clips_return=[])
+    patches = _patch_pipeline(detect_return=[])
     ctxs = _apply_patches(patches)
     try:
         runner.process(job)
@@ -278,37 +317,32 @@ def test_get_resume_index_with_no_last_stage(runner: JobRunner):
     assert runner.get_resume_index(job) == 0
 
 
-def test_get_resume_index_after_partial_completion(runner: JobRunner):
+def test_get_resume_index_after_downloading_complete(runner: JobRunner):
+    """After only downloading is complete, resume index should point to detecting."""
     job_id = state.enqueue_job("https://www.youtube.com/watch?v=resume")
     state.update_job_metadata(
         job_id, youtube_id="resume", video_title="Resume Video", video_duration_s=120
     )
     state.mark_stage_complete(job_id, "downloading")
-    state.mark_stage_complete(job_id, "transcribing")
     job = state.get_job(job_id)
 
     assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("detecting")
 
 
 def test_crash_resume_skips_already_completed_stages(runner: JobRunner):
-    """A job that crashed after transcribing should resume at detecting.
+    """A job that crashed during detecting should resume at detecting.
 
-    The pipeline loop itself does not re-invoke download/transcribe stage
-    handlers for stages already marked complete (it starts iterating
-    STAGE_ORDER at the resume index), but since their in-memory artifacts
-    (video_path/segments) don't survive a crash, the runner recomputes them
-    once up front before resuming -- this is a deliberate trade-off
-    (idempotent re-download/re-transcribe) in exchange for correctness.
-    The resumed run must still reach `detecting` exactly once via the main
-    loop and proceed through to completion.
+    Since downloading is already complete (its in-memory artifact video_path
+    is gone), the runner recomputes the download once before resuming at the
+    main loop's first uncompleted stage. The resumed run must still reach
+    detecting exactly once via the main loop and proceed to completion.
     """
     job_id = state.enqueue_job("https://www.youtube.com/watch?v=crash")
     state.update_job_metadata(
         job_id, youtube_id="crash", video_title="Crash Video", video_duration_s=120
     )
-    state.update_job_stage(job_id, "transcribing")
+    state.update_job_stage(job_id, "detecting")
     state.mark_stage_complete(job_id, "downloading")
-    state.mark_stage_complete(job_id, "transcribing")
     job = state.get_job(job_id)
 
     assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("detecting")
@@ -320,10 +354,10 @@ def test_crash_resume_skips_already_completed_stages(runner: JobRunner):
     finally:
         _stop_patches(ctxs)
 
-    # Recomputed once each to recover lost in-memory state, not once per stage.
+    # download recomputed once to recover lost in-memory video_path.
     assert patches["processing.downloader.download"].call_count == 1
-    assert patches["processing.transcriber.transcribe"].call_count == 1
-    patches["processing.clip_detector.detect_clips"].assert_called_once()
+    # _detect called once (via the main loop's detecting stage).
+    patches["core.job_runner.JobRunner._detect"].assert_called_once()
 
     final_job = state.get_job(job_id)
     assert final_job["state"] == "complete"
@@ -337,7 +371,6 @@ def test_run_resumes_inflight_jobs_on_startup(runner: JobRunner, monkeypatch):
     )
     state.update_job_stage(job_id, "formatting")
     state.mark_stage_complete(job_id, "downloading")
-    state.mark_stage_complete(job_id, "transcribing")
     state.mark_stage_complete(job_id, "detecting")
     state.mark_stage_complete(job_id, "editing")
     state.mark_stage_complete(job_id, "captioning")
@@ -362,8 +395,7 @@ def test_run_resumes_inflight_jobs_on_startup(runner: JobRunner, monkeypatch):
     # gone after a crash, so they are recomputed once each before formatting
     # runs -- but the main stage loop itself only executes formatting/posting.
     patches["processing.downloader.download"].assert_called_once()
-    patches["processing.transcriber.transcribe"].assert_called_once()
-    patches["processing.clip_detector.detect_clips"].assert_called_once()
+    patches["core.job_runner.JobRunner._detect"].assert_called_once()
     patches["processing.editor.crop_to_vertical"].assert_called()
     patches["processing.caption_burner.burn_captions"].assert_called()
     patches["processing.formatter.format_clip"].assert_called()
@@ -387,7 +419,6 @@ def test_resume_from_formatting_complete_skips_reformatting_goes_straight_to_pos
         job_id, youtube_id="formatted", video_title="Formatted Video", video_duration_s=60
     )
     state.mark_stage_complete(job_id, "downloading")
-    state.mark_stage_complete(job_id, "transcribing")
     state.mark_stage_complete(job_id, "detecting")
     state.mark_stage_complete(job_id, "editing")
     state.mark_stage_complete(job_id, "captioning")
@@ -418,11 +449,9 @@ def test_resume_from_formatting_complete_skips_reformatting_goes_straight_to_pos
     patches["processing.editor.crop_to_vertical"].assert_not_called()
     patches["processing.caption_burner.burn_captions"].assert_not_called()
     patches["processing.formatter.format_clip"].assert_not_called()
-    # downloading/transcribing/detecting are also skipped since start_idx is
-    # past formatting -- the early-return branch never touches them either.
+    # downloading/detecting are also skipped since start_idx is past formatting.
     patches["processing.downloader.download"].assert_not_called()
-    patches["processing.transcriber.transcribe"].assert_not_called()
-    patches["processing.clip_detector.detect_clips"].assert_not_called()
+    patches["core.job_runner.JobRunner._detect"].assert_not_called()
 
     final_job = state.get_job(job_id)
     assert final_job["state"] == "complete"
@@ -452,7 +481,6 @@ def test_resume_mid_formatting_does_not_duplicate_persisted_clips(runner: JobRun
         job_id, youtube_id="midformat", video_title="Mid Format Video", video_duration_s=60
     )
     state.mark_stage_complete(job_id, "downloading")
-    state.mark_stage_complete(job_id, "transcribing")
     state.mark_stage_complete(job_id, "detecting")
     state.mark_stage_complete(job_id, "editing")
     state.mark_stage_complete(job_id, "captioning")
@@ -524,13 +552,6 @@ def test_completion_cleans_up_raw_and_intermediate_files_keeps_final_clips(
 
     raw_video = raw_dir / "abc123.mp4"
     raw_video.write_bytes(b"raw video bytes")
-
-    def make_intermediate_and_final(idx: int):
-        (clips_dir / f"edited_{idx}.mp4").write_bytes(b"edited")
-        (clips_dir / f"captioned_{idx}.mp4").write_bytes(b"captioned")
-        final_path = clips_dir / f"clip_{idx}.mp4"
-        final_path.write_bytes(b"final")
-        return str(final_path)
 
     def crop_side_effect(input_path, start_s, end_s, output_path):
         Path(output_path).write_bytes(b"edited")
