@@ -25,9 +25,11 @@ env/
 # macOS
 .DS_Store
 
-# Job working directories (raw footage and cut clips are large / transient)
-data/jobs/*/raw/
-data/jobs/*/clips/
+# Job working directories (runtime artifacts: metadata, raw footage, cut clips)
+data/jobs/*
+!data/jobs/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
 
 # SQLite databases
 data/*.db
