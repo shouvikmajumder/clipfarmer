@@ -1,24 +1,29 @@
-"""Job orchestration: polls for queued jobs and downloads them to disk.
+"""Job orchestration: polls for queued jobs, downloads them, and detects clips.
 
 ``JobRunner`` owns the main processing loop. It is designed to run as a
 long-lived process, continuously polling ``state.get_next_queued_job()`` and
-driving each job through the single ``downloading`` stage. It supports
-resumption: if a job's ``last_stage_completed`` is already ``"downloading"``,
-the file is already on disk from before a crash, so the job is marked
-complete directly without re-downloading.
+driving each job through the full two-stage pipeline:
 
-Scope: this pipeline's entire job is to take a queued YouTube URL and turn
-it into a downloaded video file on disk -- nothing more. Clip curation
-(transcription, clip detection, editing, captioning, formatting) and posting
-are a separate, future downstream workflow and are intentionally NOT called
-from here.
+    queued -> downloading -> detecting -> complete
 
-Pipeline stage order:
-    queued -> downloading -> complete
+Stage summary:
+
+- **downloading**: validates the URL, checks disk space, and downloads the
+  source video to ``data/jobs/<job_id>/raw/<youtube_id>.mp4`` via
+  ``processing.downloader``.
+
+- **detecting**: fetches the transcript (``processing.transcript_fetcher``),
+  comments (``processing.comments``), and audio signals
+  (``processing.audio_analyzer``) concurrently, then calls
+  ``processing.clip_detector.detect`` to score and select clip windows.
+  Results are persisted to ``data/jobs/<job_id>/clips.json`` via
+  ``core.state``.
+
+Resumption is supported at both stage boundaries: if a crash left
+``last_stage_completed="downloading"``, the runner skips re-downloading and
+resumes directly into clip detection.
 
 Jobs are processed one at a time, FIFO, oldest ``submitted_at`` first.
-Downloaded files are kept on disk (not cleaned up) since they are the
-deliverable the next workflow will read from.
 """
 
 from __future__ import annotations
@@ -57,23 +62,24 @@ def _load_settings() -> dict[str, Any]:
 
 
 class JobRunner:
-    """Orchestrates download-only processing of queued jobs.
+    """Orchestrates download and clip-detection processing of queued jobs.
 
     Responsibilities:
     - Poll for the next queued job in a tight loop (with configurable sleep).
     - Pre-flight validate the job's URL before downloading.
     - Check available disk space before starting a download.
     - Delegate the download to ``processing.downloader.download``.
-    - Update job state in ``core.state`` before and after the download.
+    - Fetch transcript, comments, and audio signals concurrently, then run
+      ``processing.clip_detector.detect`` and persist resulting clip windows.
+    - Update job state in ``core.state`` before and after each stage.
     - Handle exceptions: mark the job failed and keep polling.
-    - Resume in-flight jobs after a crash: if the download already
-      completed before the crash, mark the job complete without
-      re-downloading; otherwise (re-)run the download.
+    - Resume in-flight jobs after a crash: if a stage already completed before
+      the crash, skip it and continue from the next stage.
     """
 
-    # Canonical (single-stage) pipeline order. Used to compute crash-recovery
+    # Canonical two-stage pipeline order. Used to compute crash-recovery
     # resume points.
-    STAGE_ORDER: list[str] = ["downloading"]
+    STAGE_ORDER: list[str] = ["downloading", "detecting"]
 
     def __init__(self) -> None:
         """Initialise the runner, loading worker settings from settings.yaml."""
@@ -171,20 +177,19 @@ class JobRunner:
             return 0
 
     def process(self, job: dict) -> None:
-        """Run *job* through pre-flight validation and the download stage.
+        """Run *job* through pre-flight validation, downloading, and clip detection.
 
         Pre-flight URL validation runs unconditionally the first time
         through (it is cheap and idempotent); on rejection the job is
-        cancelled and this method returns immediately without downloading.
+        cancelled and this method returns immediately.
 
-        Crash-resume: if the download already completed before a prior
-        crash (``get_resume_index`` is past the only stage), the file is
-        already on disk -- the job is marked complete directly without
-        re-downloading.
+        Crash-resume: if all stages already completed before a prior crash
+        (``get_resume_index`` is past the last stage), the job is marked
+        complete directly without repeating any work.
 
-        Any unhandled exception raised while downloading marks the job
-        failed and returns -- it does not propagate, so the worker loop
-        keeps running.
+        Any unhandled exception inside the stage loop marks the job failed
+        and returns -- it does not propagate, so the worker loop keeps
+        running.
 
         Args:
             job: Job metadata dict as returned by ``state.get_job``.
@@ -203,23 +208,41 @@ class JobRunner:
             state.update_job_metadata(job_id, **metadata)
             job = state.get_job(job_id)
 
-        # ---- Crash-resume: download already completed before a crash ----
+        # ---- Crash-resume: all stages already completed before a crash ----
         if self.get_resume_index(job) >= len(self.STAGE_ORDER):
             state.mark_job_complete(job_id)
             return
 
         try:
-            if not self._has_enough_disk_space(job_id):
-                return
-            state.update_job_stage(job_id, "downloading")
-            self._download(job)
-        except Exception as exc:  # noqa: BLE001 - top-level safety net
-            logger.exception("Job %s failed during download", job_id)
-            state.mark_job_failed(job_id, str(exc))
-            return
+            resume_index = self.get_resume_index(job)
+            video_path: str | None = None
 
-        state.mark_stage_complete(job_id, "downloading")
-        state.mark_job_complete(job_id)
+            # --- downloading ---
+            if resume_index <= self.STAGE_ORDER.index("downloading"):
+                if not self._has_enough_disk_space(job_id):
+                    return
+                state.update_job_stage(job_id, "downloading")
+                video_path = self._download(job)
+                state.mark_stage_complete(job_id, "downloading")
+
+            # --- detecting ---
+            if resume_index <= self.STAGE_ORDER.index("detecting"):
+                if video_path is None:  # crash-resume into detecting
+                    video_path = self._locate_video(job)
+                    if video_path is None:
+                        state.mark_job_failed(
+                            job_id, "downloaded video not found for detection"
+                        )
+                        return
+                state.update_job_stage(job_id, "detecting")
+                self._detect(video_path, job)
+                state.mark_stage_complete(job_id, "detecting")
+
+            state.mark_job_complete(job_id)
+
+        except Exception as exc:  # noqa: BLE001 - top-level safety net
+            logger.exception("Job %s failed", job_id)
+            state.mark_job_failed(job_id, str(exc))
 
     # ------------------------------------------------------------------
     # Stage implementation
@@ -273,3 +296,127 @@ class JobRunner:
         from processing.downloader import download
 
         return download(job)
+
+    def _locate_video(self, job: dict) -> str | None:
+        """Locate the already-downloaded video file for *job*.
+
+        Tries the deterministic path ``raw/<youtube_id>.mp4`` first, then
+        falls back to the first sorted match of ``raw/*.*``. Returns ``None``
+        if neither yields an existing file. Never raises.
+
+        Args:
+            job: Job metadata dict (must contain ``"id"`` and optionally
+                 ``"youtube_id"``).
+
+        Returns:
+            Absolute path string to the video file, or ``None`` if not found.
+        """
+        raw_dir = state.JOBS_DIR / job["id"] / "raw"
+        youtube_id = job.get("youtube_id")
+
+        if youtube_id:
+            candidate = raw_dir / f"{youtube_id}.mp4"
+            if candidate.exists():
+                return str(candidate)
+
+        try:
+            matches = sorted(raw_dir.glob("*.*"))
+        except OSError:
+            return None
+
+        for path in matches:
+            if path.is_file():
+                return str(path)
+
+        return None
+
+    def _detect(self, video_path: str, job: dict) -> list[dict]:
+        """Run clip detection for *job* using *video_path* as the source file.
+
+        Fetches transcript, comments, and audio signals concurrently, then
+        calls ``processing.clip_detector.detect`` to score and select clip
+        windows. Results are persisted idempotently to ``clips.json`` via
+        ``core.state``.
+
+        A run that produces zero clips is treated as a valid completion (a
+        warning is logged but the job is not failed).
+
+        Args:
+            video_path: Absolute path to the downloaded video file.
+            job: Job metadata dict.
+
+        Returns:
+            List of clip dicts returned by ``detect``, possibly empty.
+        """
+        import concurrent.futures
+
+        from processing.clip_detector import detect
+        from processing.transcript_fetcher import fetch_transcript
+        from processing.comments import fetch_comments
+        from processing.audio_analyzer import AudioSignals
+
+        youtube_id = job.get("youtube_id")
+
+        def _audio() -> "AudioSignals | None":
+            try:
+                return AudioSignals.from_file(video_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Job %s: audio analysis failed, continuing without audio: %s",
+                    job["id"],
+                    exc,
+                )
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            f_transcript = executor.submit(fetch_transcript, youtube_id)
+            f_comments = executor.submit(fetch_comments, youtube_id)
+            f_audio = executor.submit(_audio)
+
+            transcript = f_transcript.result()
+            comments = f_comments.result()
+            audio = f_audio.result()
+
+        logger.info(
+            "Job %s: detect — transcript=%s, comments=%d, audio=%s",
+            job["id"],
+            "found" if transcript else "none",
+            len(comments),
+            "ok" if audio is not None else "unavailable",
+        )
+
+        max_clips = (job.get("options") or {}).get("max_clips")
+
+        clips = detect(transcript, comments=comments, audio_signals=audio, max_clips=max_clips)
+
+        # Persist idempotently: clear first so a crash-resumed re-run never
+        # duplicates records, then append each clip individually.
+        state.save_clips(job["id"], [])
+
+        for c in clips:
+            record: dict = {
+                "start_s": c["start_s"],
+                "end_s": c["end_s"],
+                "score": c["score"],
+            }
+
+            if transcript:
+                start_s = c["start_s"]
+                end_s = c["end_s"]
+                snippet_parts = [
+                    seg.get("text", "").strip()
+                    for seg in transcript
+                    if (seg.get("start") or 0.0) < end_s
+                    and (seg.get("end") or 0.0) > start_s
+                ]
+                snippet = " ".join(p for p in snippet_parts if p)
+                record["transcript_snippet"] = snippet[:200]
+
+            state.add_clip(job["id"], record)
+
+        if not clips:
+            logger.warning(
+                "Job %s: detection produced no clips above threshold", job["id"]
+            )
+
+        return clips
