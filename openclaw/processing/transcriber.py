@@ -64,6 +64,72 @@ def _load_clip_whisper_model_name() -> str:
     return settings.get("worker", {}).get("clip_whisper_model", DEFAULT_CLIP_WHISPER_MODEL)
 
 
+def transcribe_words(video_path: str, model_name: str | None = None) -> list[dict]:
+    """Transcribe *video_path* using mlx-whisper and return word-level timestamps.
+
+    Used by the captioning stage to get per-word timing for SRT generation.
+    The edited clip starts at t=0, so the returned word times are already
+    clip-relative and require no offset adjustment.
+
+    Args:
+        video_path:  Absolute path to the video or audio file to transcribe.
+        model_name:  Whisper model name/repo to use.  When ``None`` (default),
+                     the model is read from ``config/settings.yaml``
+                     (``worker.clip_whisper_model``, default ``"base"``).
+
+    Returns:
+        List of word dicts, each with the shape::
+
+            {
+                "word":  str,    # the word text (stripped)
+                "start": float,  # word start time in seconds
+                "end":   float,  # word end time in seconds
+            }
+
+        Words with missing or None start/end values are skipped.
+
+    Raises:
+        RuntimeError: If mlx-whisper inference fails or returns no segments.
+    """
+    import mlx_whisper
+
+    resolved_model = model_name if model_name is not None else _load_clip_whisper_model_name()
+
+    try:
+        result: dict[str, Any] = mlx_whisper.transcribe(
+            video_path,
+            path_or_hf_repo=resolved_model,
+            word_timestamps=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"mlx-whisper word transcription failed for {video_path!r} "
+            f"(model={resolved_model!r}): {exc}"
+        ) from exc
+
+    segments = result.get("segments") if result else None
+    if segments is None:
+        raise RuntimeError(
+            f"mlx-whisper returned no segments for {video_path!r} (model={resolved_model!r})"
+        )
+
+    words: list[dict] = []
+    for seg in segments:
+        for w in seg.get("words", []):
+            start = w.get("start")
+            end = w.get("end")
+            if start is None or end is None:
+                continue
+            words.append(
+                {
+                    "word": str(w.get("word", "")).strip(),
+                    "start": float(start),
+                    "end": float(end),
+                }
+            )
+    return words
+
+
 def transcribe(video_path: str, model_name: str | None = None) -> list[dict]:
     """Transcribe *video_path* using mlx-whisper and return timed segments.
 
