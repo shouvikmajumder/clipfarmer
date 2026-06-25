@@ -51,13 +51,19 @@ def _patch_pipeline(
     fetch_transcript_return=None,
     fetch_comments_return=None,
     audio_signals_return=None,
+    edit_clip_side_effect=None,
 ):
-    """Build a dict of patch targets -> behaviours for the two-stage pipeline.
+    """Build a dict of patch targets -> behaviours for the three-stage pipeline.
 
     Detection mocks default to returning an empty clip list (so the job still
     reaches COMPLETE) unless *detect_return* / *detect_side_effect* are given.
     The individual component mocks (transcript, comments, audio) can also be
     overridden; they default to None / [] / None respectively.
+
+    The editing stage's ``processing.editor.edit_clip`` is mocked too: by
+    default it simply returns the ``output_path`` it was handed (so a clip's
+    ``file_path`` is recorded) without invoking FFmpeg. Pass
+    *edit_clip_side_effect* to override (e.g. to raise).
     """
     if validate_url_return is None and validate_url_side_effect is None:
         validate_url_return = {
@@ -103,6 +109,15 @@ def _patch_pipeline(
     audio_mock = MagicMock(return_value=audio_signals_return)
     patches["processing.audio_analyzer.AudioSignals.from_file"] = audio_mock
 
+    # Editing stage — lazily imported by _edit at call time. Default: echo the
+    # output_path back so file_path gets recorded, without running FFmpeg.
+    def _default_edit(input_path, start_s, end_s, output_path, **kwargs):
+        return output_path
+
+    edit_mock = MagicMock()
+    edit_mock.side_effect = edit_clip_side_effect or _default_edit
+    patches["processing.editor.edit_clip"] = edit_mock
+
     return patches
 
 
@@ -125,7 +140,7 @@ def _stop_patches(ctxs):
 
 
 def test_full_pipeline_reaches_complete(runner: JobRunner):
-    """A queued job must pass through downloading AND detecting and end COMPLETE."""
+    """A queued job must pass through downloading, detecting AND editing, end COMPLETE."""
     job = _make_job()
     patches = _patch_pipeline()
     ctxs = _apply_patches(patches)
@@ -138,8 +153,8 @@ def test_full_pipeline_reaches_complete(runner: JobRunner):
     assert final_job["state"] == "complete"
     assert final_job["youtube_id"] == "abc123"
     assert final_job["video_title"] == "Test Video"
-    # Both stages must have completed; the last one recorded is "detecting".
-    assert final_job["last_stage_completed"] == "detecting"
+    # All three stages must have completed; the last one recorded is "editing".
+    assert final_job["last_stage_completed"] == "editing"
 
     patches["processing.downloader.download"].assert_called_once()
     patches["processing.clip_detector.detect"].assert_called_once()
@@ -644,9 +659,9 @@ def test_crash_resume_into_detecting_with_missing_video_fails_job(
 # ---------------------------------------------------------------------------
 
 
-def test_state_passes_through_detecting(runner: JobRunner, isolated_jobs_dir: Path):
-    """process() must call update_job_stage('detecting') and mark_stage_complete('detecting'),
-    and the final job must have last_stage_completed == 'detecting'."""
+def test_state_passes_through_detecting_and_editing(runner: JobRunner, isolated_jobs_dir: Path):
+    """process() must move through both 'detecting' and 'editing' stages, and the
+    final job must have last_stage_completed == 'editing'."""
     job = _make_job()
     video_file = _make_fake_video(isolated_jobs_dir, job["id"])
 
@@ -678,8 +693,241 @@ def test_state_passes_through_detecting(runner: JobRunner, isolated_jobs_dir: Pa
 
     assert "downloading" in stage_updates
     assert "detecting" in stage_updates
+    assert "editing" in stage_updates
     assert "downloading" in stage_completions
     assert "detecting" in stage_completions
+    assert "editing" in stage_completions
 
     final_job = state.get_job(job["id"])
-    assert final_job["last_stage_completed"] == "detecting"
+    assert final_job["last_stage_completed"] == "editing"
+
+
+# ---------------------------------------------------------------------------
+# Editing stage — end-to-end and unit coverage
+# ---------------------------------------------------------------------------
+
+
+def test_editing_persists_file_path(runner: JobRunner, isolated_jobs_dir: Path):
+    """After editing, each detected clip must carry a file_path pointing at its
+    rendered output, and the job must end COMPLETE at the editing stage."""
+    two_clips = [
+        {"start_s": 10.0, "end_s": 40.0, "score": 0.85},
+        {"start_s": 60.0, "end_s": 90.0, "score": 0.72},
+    ]
+    job = _make_job()
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    patches = _patch_pipeline(download_return=str(video_file), detect_return=two_clips)
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "complete"
+    assert final_job["last_stage_completed"] == "editing"
+
+    clips = state.get_clips_for_job(job["id"])
+    assert len(clips) == 2
+    for idx, clip in enumerate(clips):
+        assert clip["file_path"].endswith(f"clip_{idx}_edited.mp4")
+
+    # edit_clip must have run once per clip.
+    assert patches["processing.editor.edit_clip"].call_count == 2
+
+
+def test_editing_forwards_profile_and_crop_bias_from_options(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """content_profile / crop_bias set in the job options must be forwarded to edit_clip."""
+    job_id = state.enqueue_job(
+        "https://www.youtube.com/watch?v=prof",
+        options={"content_profile": "interview", "crop_bias": "right"},
+    )
+    job = state.get_job(job_id)
+    video_file = _make_fake_video(isolated_jobs_dir, job_id)
+
+    patches = _patch_pipeline(
+        download_return=str(video_file),
+        detect_return=[{"start_s": 1.0, "end_s": 20.0, "score": 0.9}],
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    edit_mock = patches["processing.editor.edit_clip"]
+    edit_mock.assert_called_once()
+    _, kwargs = edit_mock.call_args
+    assert kwargs["profile"] == "interview"
+    assert kwargs["crop_bias"] == "right"
+
+
+def test_editing_uses_default_profile_from_settings(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """When the job options omit content_profile, the settings default ('default')
+    must be used."""
+    job = _make_job()
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    patches = _patch_pipeline(
+        download_return=str(video_file),
+        detect_return=[{"start_s": 1.0, "end_s": 20.0, "score": 0.9}],
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    _, kwargs = patches["processing.editor.edit_clip"].call_args
+    assert kwargs["profile"] == "default"
+
+
+def test_all_clips_fail_editing_marks_job_failed(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """If edit_clip raises for every clip, the job must be marked FAILED."""
+    job = _make_job()
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    patches = _patch_pipeline(
+        download_return=str(video_file),
+        detect_return=[{"start_s": 1.0, "end_s": 20.0, "score": 0.9}],
+        edit_clip_side_effect=RuntimeError("ffmpeg boom"),
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "failed"
+    assert "all clips failed during editing" in final_job["error_message"]
+
+
+def test_editing_partial_failure_is_isolated(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """If one clip fails editing but another succeeds, the job completes and only
+    the succeeding clip carries a file_path."""
+    two_clips = [
+        {"start_s": 1.0, "end_s": 20.0, "score": 0.9},
+        {"start_s": 30.0, "end_s": 50.0, "score": 0.8},
+    ]
+    job = _make_job()
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    calls = {"n": 0}
+
+    def _edit(input_path, start_s, end_s, output_path, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("first clip boom")
+        return output_path
+
+    patches = _patch_pipeline(
+        download_return=str(video_file),
+        detect_return=two_clips,
+        edit_clip_side_effect=_edit,
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "complete"
+
+    clips = state.get_clips_for_job(job["id"])
+    assert len(clips) == 2
+    with_path = [c for c in clips if c.get("file_path")]
+    assert len(with_path) == 1
+
+
+def test_resume_into_editing_runs_only_editing(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """Resuming a job whose detecting stage already completed must run ONLY
+    editing — download and detect must not be called."""
+    job_id = state.enqueue_job("https://www.youtube.com/watch?v=redit")
+    state.update_job_metadata(
+        job_id, youtube_id="redit", video_title="Redit", video_duration_s=120
+    )
+    # Pre-seed the clips that detecting would have produced.
+    state.add_clip(job_id, {"start_s": 1.0, "end_s": 20.0, "score": 0.9})
+    state.add_clip(job_id, {"start_s": 30.0, "end_s": 50.0, "score": 0.8})
+    state.mark_stage_complete(job_id, "detecting")
+    job = state.get_job(job_id)
+
+    assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("editing")
+
+    _make_fake_video(isolated_jobs_dir, job_id, youtube_id="redit")
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    patches["processing.downloader.download"].assert_not_called()
+    patches["processing.clip_detector.detect"].assert_not_called()
+    assert patches["processing.editor.edit_clip"].call_count == 2
+
+    final_job = state.get_job(job_id)
+    assert final_job["state"] == "complete"
+    assert final_job["last_stage_completed"] == "editing"
+
+
+def test_crash_resume_into_editing_with_missing_video_fails_job(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """Resuming into editing with no video file present must mark the job failed."""
+    job_id = state.enqueue_job("https://www.youtube.com/watch?v=emiss")
+    state.update_job_metadata(
+        job_id, youtube_id="emiss", video_title="Emiss", video_duration_s=60
+    )
+    state.add_clip(job_id, {"start_s": 1.0, "end_s": 20.0, "score": 0.9})
+    state.mark_stage_complete(job_id, "detecting")
+    job = state.get_job(job_id)
+
+    # raw dir exists but is empty — _locate_video returns None.
+    raw_dir = isolated_jobs_dir / job_id / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job_id)
+    assert final_job["state"] == "failed"
+    assert "downloaded video not found for editing" in final_job["error_message"]
+
+    patches["processing.downloader.download"].assert_not_called()
+    patches["processing.clip_detector.detect"].assert_not_called()
+
+
+def test_get_resume_index_after_detecting_and_editing(runner: JobRunner):
+    """After detecting completes, resume index points at editing (2); after editing
+    completes, it points past the end (== len(STAGE_ORDER))."""
+    job_id = state.enqueue_job("https://www.youtube.com/watch?v=ridx")
+    state.update_job_metadata(
+        job_id, youtube_id="ridx", video_title="Ridx", video_duration_s=60
+    )
+
+    state.mark_stage_complete(job_id, "detecting")
+    job = state.get_job(job_id)
+    assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("editing")
+
+    state.mark_stage_complete(job_id, "editing")
+    job = state.get_job(job_id)
+    assert runner.get_resume_index(job) == len(JobRunner.STAGE_ORDER)

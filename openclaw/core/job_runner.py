@@ -1,10 +1,11 @@
-"""Job orchestration: polls for queued jobs, downloads them, and detects clips.
+"""Job orchestration: polls for queued jobs, downloads them, detects clips,
+and edits each detected clip to vertical format.
 
 ``JobRunner`` owns the main processing loop. It is designed to run as a
 long-lived process, continuously polling ``state.get_next_queued_job()`` and
-driving each job through the full two-stage pipeline:
+driving each job through the full three-stage pipeline:
 
-    queued -> downloading -> detecting -> complete
+    queued -> downloading -> detecting -> editing -> complete
 
 Stage summary:
 
@@ -19,9 +20,15 @@ Stage summary:
   Results are persisted to ``data/jobs/<job_id>/clips.json`` via
   ``core.state``.
 
-Resumption is supported at both stage boundaries: if a crash left
-``last_stage_completed="downloading"``, the runner skips re-downloading and
-resumes directly into clip detection.
+- **editing**: crops each detected clip window to 9:16 vertical format using
+  ``processing.editor.edit_clip``. Clips are written to
+  ``data/jobs/<job_id>/clips/clip_<idx>_edited.mp4`` and the ``file_path``
+  field on each clip record is updated in ``clips.json``. The editing step is
+  idempotent: already-rendered output files are skipped on crash-resume.
+
+Resumption is supported at all stage boundaries: if a crash left
+``last_stage_completed="downloading"`` or ``"detecting"``, the runner skips
+the completed stages and resumes from the next one.
 
 Jobs are processed one at a time, FIFO, oldest ``submitted_at`` first.
 """
@@ -77,12 +84,16 @@ class JobRunner:
       the crash, skip it and continue from the next stage.
     """
 
-    # Canonical two-stage pipeline order. Used to compute crash-recovery
+    # Canonical three-stage pipeline order. Used to compute crash-recovery
     # resume points.
-    STAGE_ORDER: list[str] = ["downloading", "detecting"]
+    STAGE_ORDER: list[str] = ["downloading", "detecting", "editing"]
 
     def __init__(self) -> None:
-        """Initialise the runner, loading worker settings from settings.yaml."""
+        """Initialise the runner, loading worker settings from settings.yaml.
+
+        Drives each queued job through the full pipeline:
+        downloading -> detecting -> editing -> complete.
+        """
         settings = _load_settings()
         worker_settings = settings.get("worker", {}) or {}
         general_settings = settings.get("general", {}) or {}
@@ -177,7 +188,8 @@ class JobRunner:
             return 0
 
     def process(self, job: dict) -> None:
-        """Run *job* through pre-flight validation, downloading, and clip detection.
+        """Run *job* through pre-flight validation, downloading, clip detection,
+        and clip editing.
 
         Pre-flight URL validation runs unconditionally the first time
         through (it is cheap and idempotent); on rejection the job is
@@ -237,6 +249,19 @@ class JobRunner:
                 state.update_job_stage(job_id, "detecting")
                 self._detect(video_path, job)
                 state.mark_stage_complete(job_id, "detecting")
+
+            # --- editing ---
+            if resume_index <= self.STAGE_ORDER.index("editing"):
+                if video_path is None:  # crash-resume into editing
+                    video_path = self._locate_video(job)
+                    if video_path is None:
+                        state.mark_job_failed(
+                            job_id, "downloaded video not found for editing"
+                        )
+                        return
+                state.update_job_stage(job_id, "editing")
+                self._edit(video_path, job)
+                state.mark_stage_complete(job_id, "editing")
 
             state.mark_job_complete(job_id)
 
@@ -420,3 +445,93 @@ class JobRunner:
             )
 
         return clips
+
+    def _edit(self, video_path: str, job: dict) -> list[dict]:
+        """Crop each detected clip to 9:16 vertical format using the configured
+        editing profile.
+
+        Reads clip windows from ``clips.json``, renders each one via
+        ``processing.editor.edit_clip``, writes outputs to
+        ``data/jobs/<job_id>/clips/clip_<idx>_edited.mp4``, and persists the
+        updated ``file_path`` values back to ``clips.json``.
+
+        A job with zero detected clips is treated as a valid completion; a
+        warning is logged and an empty list is returned.
+
+        Per-clip isolation: a failure on one clip is logged and skipped; the
+        remaining clips are still processed. If *all* clips fail, a
+        ``RuntimeError`` is raised so the ``process()`` wrapper marks the job
+        failed.
+
+        Note: ``edit_clip``'s own cache guard makes crash-resumed re-runs
+        idempotent — already-rendered output files are detected and skipped
+        automatically.
+
+        Args:
+            video_path: Absolute path to the downloaded source video.
+            job: Job metadata dict.
+
+        Returns:
+            List of clip dicts that were successfully edited (``file_path``
+            set), possibly empty if there were no clips to process.
+
+        Raises:
+            RuntimeError: If there were clips to edit but every one failed.
+        """
+        # Lazy import keeps the top-level module importable even when ffmpeg is
+        # not installed (tests that mock edit_clip can still import job_runner).
+        from processing.editor import edit_clip
+
+        job_id = job["id"]
+        clips = state.get_clips_for_job(job_id)
+
+        if not clips:
+            logger.info("Job %s: no clips to edit", job_id)
+            return []
+
+        # Resolve editing config from settings.yaml, falling back to safe defaults.
+        settings = _load_settings()
+        editing_cfg = settings.get("editing", {}) or {}
+        default_profile = editing_cfg.get("default_profile", "default")
+        gaming_cfg = settings.get("gaming", {}) or {}
+        facecam_region = gaming_cfg.get("facecam_region")
+
+        opts = job.get("options") or {}
+        profile = opts.get("content_profile", default_profile)
+        crop_bias = opts.get("crop_bias", "center")
+
+        clips_dir = state.JOBS_DIR / job_id / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+
+        succeeded: list[dict] = []
+
+        for idx, clip in enumerate(clips):
+            output_path = str(clips_dir / f"clip_{idx}_edited.mp4")
+            try:
+                edit_clip(
+                    video_path,
+                    clip["start_s"],
+                    clip["end_s"],
+                    output_path,
+                    profile=profile,
+                    crop_bias=crop_bias,
+                    facecam_region=facecam_region,
+                )
+                clip["file_path"] = output_path
+                succeeded.append(clip)
+            except Exception as exc:  # noqa: BLE001 - per-clip isolation
+                logger.error(
+                    "Job %s: clip %d failed during editing, skipping: %s",
+                    job_id,
+                    idx,
+                    exc,
+                )
+
+        # Persist updated file_path values for succeeded clips (clips list was
+        # mutated in place, so failed clips retain their original state too).
+        state.save_clips(job_id, clips)
+
+        if clips and not succeeded:
+            raise RuntimeError("all clips failed during editing")
+
+        return succeeded

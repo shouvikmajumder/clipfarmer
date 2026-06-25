@@ -5,11 +5,12 @@ import pytest
 from core.job_states import JobState, VALID_TRANSITIONS, assert_valid_transition
 
 
-# Linear pipeline order: queued → downloading → detecting → complete.
+# Linear pipeline order: queued → downloading → detecting → editing → complete.
 PIPELINE_ORDER = [
     JobState.QUEUED,
     JobState.DOWNLOADING,
     JobState.DETECTING,
+    JobState.EDITING,
     JobState.COMPLETE,
 ]
 
@@ -17,6 +18,7 @@ NON_TERMINAL_STATES = [
     JobState.QUEUED,
     JobState.DOWNLOADING,
     JobState.DETECTING,
+    JobState.EDITING,
 ]
 
 TERMINAL_STATES = [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED]
@@ -36,13 +38,24 @@ def test_downloading_to_detecting_is_valid():
     assert_valid_transition(JobState.DOWNLOADING, JobState.DETECTING)  # should not raise
 
 
-def test_detecting_to_complete_is_valid():
-    """The new second pipeline stage must transition cleanly to complete."""
-    assert_valid_transition(JobState.DETECTING, JobState.COMPLETE)  # should not raise
+def test_detecting_to_editing_is_valid():
+    """Detection now flows into the editing stage rather than straight to complete."""
+    assert_valid_transition(JobState.DETECTING, JobState.EDITING)  # should not raise
+
+
+def test_editing_to_complete_is_valid():
+    """The editing stage transitions cleanly to complete."""
+    assert_valid_transition(JobState.EDITING, JobState.COMPLETE)  # should not raise
+
+
+def test_detecting_to_complete_is_invalid():
+    """Skipping the editing stage (detecting → complete) must now be rejected."""
+    with pytest.raises(ValueError):
+        assert_valid_transition(JobState.DETECTING, JobState.COMPLETE)
 
 
 def test_downloading_to_complete_is_invalid():
-    """Skipping the detecting stage (downloading → complete) must now be rejected."""
+    """Skipping straight from downloading to complete must be rejected."""
     with pytest.raises(ValueError):
         assert_valid_transition(JobState.DOWNLOADING, JobState.COMPLETE)
 
