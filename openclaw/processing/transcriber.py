@@ -24,8 +24,10 @@ import yaml
 # Path to settings.yaml relative to this file: openclaw/processing/transcriber.py -> openclaw/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
-DEFAULT_WHISPER_MODEL = "medium"
-DEFAULT_CLIP_WHISPER_MODEL = "base"
+# mlx-whisper resolves these as Hugging Face repo ids (or local paths), NOT the
+# bare openai-whisper names like "base"/"medium" — those 404 on the HF Hub.
+DEFAULT_WHISPER_MODEL = "mlx-community/whisper-medium-mlx"
+DEFAULT_CLIP_WHISPER_MODEL = "mlx-community/whisper-base-mlx"
 
 
 def _load_whisper_model_name() -> str:

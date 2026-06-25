@@ -53,7 +53,7 @@ def test_transcribe_reads_model_name_from_settings(mock_mlx_whisper):
     transcriber.transcribe(VIDEO_PATH)
 
     _, kwargs = mock_mlx_whisper.call_args
-    assert kwargs["path_or_hf_repo"] == "medium"
+    assert kwargs["path_or_hf_repo"] == "mlx-community/whisper-medium-mlx"
 
 
 def test_transcribe_falls_back_to_default_model_when_settings_missing(

@@ -7,8 +7,10 @@ general:
   data_dir: data/
 
 worker:
-  whisper_model: medium          # model used for full-video transcription
-  clip_whisper_model: base       # smaller/faster model used when transcribing short final clips for captions
+  # mlx-whisper model ids are Hugging Face repos (mlx-community/whisper-*), not
+  # bare names like "base"/"medium" (those 404 on the Hub).
+  whisper_model: mlx-community/whisper-medium-mlx       # full-video transcription
+  clip_whisper_model: mlx-community/whisper-base-mlx    # short final clips, for caption burning
   job_poll_interval_s: 5
 
 detection:
