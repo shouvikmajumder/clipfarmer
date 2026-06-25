@@ -29,6 +29,11 @@ import os
 
 logger = logging.getLogger(__name__)
 
+
+def _ffmpeg_bin() -> str:
+    """The ffmpeg binary to invoke (override with the ``OPENCLAW_FFMPEG`` env var)."""
+    return os.environ.get("OPENCLAW_FFMPEG", "ffmpeg")
+
 # ---------------------------------------------------------------------------
 # Target resolution (9:16 at 1080p short-form vertical)
 # ---------------------------------------------------------------------------
@@ -155,6 +160,7 @@ def build_ffmpeg_cmd(
     profile: str = "default",
     crop_bias: str = "center",
     facecam_region: dict | None = None,
+    ffmpeg_bin: str = "ffmpeg",
 ) -> list[str]:
     """Return the full FFmpeg command as a list of argument strings.
 
@@ -184,7 +190,7 @@ def build_ffmpeg_cmd(
     duration = end_s - start_s
 
     return [
-        "ffmpeg",
+        ffmpeg_bin,
         "-y",
         "-ss", f"{start_s:.3f}",
         "-i", input_path,
@@ -249,6 +255,7 @@ def edit_clip(
         profile=profile,
         crop_bias=crop_bias,
         facecam_region=facecam_region,
+        ffmpeg_bin=_ffmpeg_bin(),
     )
 
     result = subprocess.run(cmd, capture_output=True)

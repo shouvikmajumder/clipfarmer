@@ -19,8 +19,43 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def _ffmpeg_bin() -> str:
+    """The ffmpeg binary to invoke.
+
+    Defaults to ``ffmpeg`` on PATH; override with the ``OPENCLAW_FFMPEG`` env var
+    to point at a build that includes the ``subtitles`` (libass) filter, which
+    homebrew-core's ffmpeg no longer bundles.
+    """
+    return os.environ.get("OPENCLAW_FFMPEG", "ffmpeg")
+
+
+def subtitles_filter_available(ffmpeg_bin: str | None = None) -> bool:
+    """Return True if the configured ffmpeg exposes the ``subtitles`` filter.
+
+    Burning captions requires the libass-backed ``subtitles`` filter, which many
+    ffmpeg builds (notably current homebrew-core) ship without.  The captioning
+    stage calls this and skips gracefully when it returns False, rather than
+    failing the job with a cryptic filtergraph error.
+    """
+    import subprocess
+
+    binary = ffmpeg_bin or _ffmpeg_bin()
+    try:
+        result = subprocess.run(
+            [binary, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except Exception:  # noqa: BLE001 - missing binary / timeout → treat as unavailable
+        return False
+    # Each filters line is "<flags> <name> <io> <desc>"; match the name column.
+    return re.search(r"(?m)^\s*\S+\s+subtitles\b", result.stdout) is not None
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -154,6 +189,7 @@ def build_burn_cmd(
     srt_path: str,
     output_path: str,
     style: str = CAPTION_STYLE,
+    ffmpeg_bin: str = "ffmpeg",
 ) -> list[str]:
     """Return the FFmpeg argument list to burn subtitles into *input_path*.
 
@@ -164,22 +200,31 @@ def build_burn_cmd(
     and re-encoded — ``-c:v copy`` is impossible when any video filter is
     active.  Audio is unmodified so ``-c:a copy`` is safe.
 
+    Escaping: the whole ``-vf`` value is passed as one argv element (no shell),
+    so the ``force_style`` value's commas must be escaped as ``\\,`` or FFmpeg's
+    filtergraph parser reads them as filter separators.  The value is NOT wrapped
+    in quotes — literal quotes in a direct argv element break the parser.
+
     Args:
         input_path:  Absolute path to the source (already edited) clip.
         srt_path:    Absolute path to the ``.srt`` subtitle file.
         output_path: Absolute path to write the captioned output video.
         style:       FFmpeg ``force_style`` string for the subtitles filter.
+        ffmpeg_bin:  ffmpeg binary to invoke (see ``_ffmpeg_bin``).
 
     Returns:
         A list of strings ready to pass directly to ``subprocess.run``.
     """
-    escaped = _escape_srt_path(srt_path)
+    escaped_path = _escape_srt_path(srt_path)
+    # Escape the commas separating force_style's key=value pairs so the outer
+    # filtergraph parser doesn't treat them as a new filter in the chain.
+    escaped_style = style.replace(",", r"\,")
     return [
-        "ffmpeg",
+        ffmpeg_bin,
         "-y",
         "-i", input_path,
         # Re-encode video: the subtitles filter modifies frames; -c:v copy is impossible.
-        "-vf", f"subtitles={escaped}:force_style='{style}'",
+        "-vf", f"subtitles={escaped_path}:force_style={escaped_style}",
         "-c:v", "h264_videotoolbox",
         "-b:v", "8M",
         "-c:a", "copy",
@@ -240,7 +285,7 @@ def caption_clip(
     with open(srt_path, "w", encoding="utf-8") as f:
         f.write(srt_content)
 
-    cmd = build_burn_cmd(input_path, srt_path, output_path)
+    cmd = build_burn_cmd(input_path, srt_path, output_path, ffmpeg_bin=_ffmpeg_bin())
     result = subprocess.run(cmd, capture_output=True)
 
     if result.returncode != 0:

@@ -352,3 +352,44 @@ def test_caption_clip_deletes_srt_on_success(tmp_path, monkeypatch):
     )
 
     assert not srt_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Escaping + ffmpeg binary + subtitles-filter availability (fixes from smoke test)
+# ---------------------------------------------------------------------------
+
+
+def test_build_burn_cmd_escapes_force_style_commas():
+    """force_style commas must be backslash-escaped (so the filtergraph parser
+    doesn't read them as filter separators) and NOT wrapped in literal quotes."""
+    cmd = caption_burner.build_burn_cmd("in.mp4", "sub.srt", "out.mp4")
+    vf = cmd[cmd.index("-vf") + 1]
+    assert vf.startswith("subtitles=sub.srt:force_style=")
+    assert r"\," in vf  # commas escaped
+    assert "force_style='" not in vf  # no spurious single quotes
+    # every comma in the value is part of an escaped "\," sequence
+    assert vf.count(",") == vf.count(r"\,")
+
+
+def test_build_burn_cmd_respects_ffmpeg_bin():
+    cmd = caption_burner.build_burn_cmd("in.mp4", "sub.srt", "out.mp4", ffmpeg_bin="/opt/ff/ffmpeg")
+    assert cmd[0] == "/opt/ff/ffmpeg"
+    # default is plain "ffmpeg"
+    assert caption_burner.build_burn_cmd("in.mp4", "sub.srt", "out.mp4")[0] == "ffmpeg"
+
+
+def test_subtitles_filter_available_true(monkeypatch):
+    fake = MagicMock(returncode=0, stdout=" T.. subtitles         V->V       Render text subtitles\n")
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=fake))
+    assert caption_burner.subtitles_filter_available("ffmpeg") is True
+
+
+def test_subtitles_filter_available_false_when_absent(monkeypatch):
+    fake = MagicMock(returncode=0, stdout=" T.. scale            V->V       Scale\n T.. overlay          VV->V    Overlay\n")
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=fake))
+    assert caption_burner.subtitles_filter_available("ffmpeg") is False
+
+
+def test_subtitles_filter_available_false_on_error(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", MagicMock(side_effect=FileNotFoundError("no ffmpeg")))
+    assert caption_burner.subtitles_filter_available("ffmpeg") is False
