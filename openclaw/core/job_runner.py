@@ -3,9 +3,9 @@ and edits each detected clip to vertical format.
 
 ``JobRunner`` owns the main processing loop. It is designed to run as a
 long-lived process, continuously polling ``state.get_next_queued_job()`` and
-driving each job through the full three-stage pipeline:
+driving each job through the full four-stage pipeline:
 
-    queued -> downloading -> detecting -> editing -> complete
+    queued -> downloading -> detecting -> editing -> captioning -> complete
 
 Stage summary:
 
@@ -26,9 +26,16 @@ Stage summary:
   field on each clip record is updated in ``clips.json``. The editing step is
   idempotent: already-rendered output files are skipped on crash-resume.
 
+- **captioning**: burns word-level captions onto each edited clip using
+  ``processing.transcriber.transcribe_words`` (per-clip Whisper) and
+  ``processing.caption_burner``. The ``gaming`` and ``irl`` content profiles
+  skip captioning entirely. Captioned clips are written to
+  ``data/jobs/<job_id>/clips/clip_<idx>_captioned.mp4`` and ``file_path`` is
+  updated. Idempotent: already-captioned outputs are skipped on crash-resume.
+
 Resumption is supported at all stage boundaries: if a crash left
-``last_stage_completed="downloading"`` or ``"detecting"``, the runner skips
-the completed stages and resumes from the next one.
+``last_stage_completed`` at any earlier stage, the runner skips the completed
+stages and resumes from the next one.
 
 Jobs are processed one at a time, FIFO, oldest ``submitted_at`` first.
 """
@@ -84,9 +91,9 @@ class JobRunner:
       the crash, skip it and continue from the next stage.
     """
 
-    # Canonical three-stage pipeline order. Used to compute crash-recovery
+    # Canonical four-stage pipeline order. Used to compute crash-recovery
     # resume points.
-    STAGE_ORDER: list[str] = ["downloading", "detecting", "editing"]
+    STAGE_ORDER: list[str] = ["downloading", "detecting", "editing", "captioning"]
 
     def __init__(self) -> None:
         """Initialise the runner, loading worker settings from settings.yaml.
@@ -262,6 +269,14 @@ class JobRunner:
                 state.update_job_stage(job_id, "editing")
                 self._edit(video_path, job)
                 state.mark_stage_complete(job_id, "editing")
+
+            # --- captioning ---
+            # Operates on the edited clip files (clip["file_path"]); needs no
+            # source video, so no _locate_video step here.
+            if resume_index <= self.STAGE_ORDER.index("captioning"):
+                state.update_job_stage(job_id, "captioning")
+                self._caption(job)
+                state.mark_stage_complete(job_id, "captioning")
 
             state.mark_job_complete(job_id)
 
@@ -533,5 +548,83 @@ class JobRunner:
 
         if clips and not succeeded:
             raise RuntimeError("all clips failed during editing")
+
+        return succeeded
+
+    def _caption(self, job: dict) -> list[dict]:
+        """Burn word-level captions onto each edited clip.
+
+        Captions come from per-clip Whisper word timestamps
+        (``transcribe_words``) run on the edited clip file, which already
+        starts at t=0 — so no transcript cache or offset is needed. The
+        ``gaming`` and ``irl`` content profiles skip captioning entirely
+        (``caption_burner.should_caption``), in which case this is a no-op and
+        each clip keeps its edited ``file_path``.
+
+        For captioned profiles, each clip's ``file_path`` (its edited mp4) is
+        captioned to ``clips/clip_<idx>_captioned.mp4`` and ``file_path`` is
+        updated. Per-clip failures are isolated; if every eligible clip fails
+        the job is failed. ``caption_clip``'s cache guard keeps a crash-resumed
+        re-run idempotent.
+
+        Args:
+            job: Job metadata dict.
+
+        Returns:
+            List of clip dicts that were successfully captioned (possibly
+            empty: no clips, or a skipped profile).
+        """
+        from processing.caption_burner import caption_clip, should_caption
+        from processing.transcriber import transcribe_words
+
+        job_id = job["id"]
+
+        settings = _load_settings()
+        default_profile = (settings.get("editing") or {}).get("default_profile", "default")
+        profile = (job.get("options") or {}).get("content_profile", default_profile)
+
+        if not should_caption(profile):
+            logger.info(
+                "Job %s: content profile %r skips captioning", job_id, profile
+            )
+            return []
+
+        clips = state.get_clips_for_job(job_id)
+        if not clips:
+            logger.info("Job %s: no clips to caption", job_id)
+            return []
+
+        clips_dir = state.JOBS_DIR / job_id / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+
+        succeeded: list[dict] = []
+        eligible = 0
+        for idx, clip in enumerate(clips):
+            edited_path = clip.get("file_path")
+            if not edited_path:
+                # Editing skipped this clip — nothing to caption.
+                continue
+            eligible += 1
+            srt_path = str(clips_dir / f"clip_{idx}.srt")
+            output_path = str(clips_dir / f"clip_{idx}_captioned.mp4")
+            try:
+                words = transcribe_words(edited_path)
+                caption_clip(edited_path, words, srt_path, output_path, offset_s=0.0)
+            except Exception as exc:  # noqa: BLE001 - isolate per-clip failures
+                logger.error(
+                    "Job %s: clip %d failed during captioning, skipping: %s",
+                    job_id,
+                    idx,
+                    exc,
+                )
+                continue
+            clip["file_path"] = output_path
+            succeeded.append(clip)
+
+        # Persist updated file_path values (clips list mutated in place).
+        state.save_clips(job_id, clips)
+
+        if eligible and not succeeded:
+            raise RuntimeError("all clips failed during captioning")
 
         return succeeded
