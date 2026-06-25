@@ -5,10 +5,10 @@
 where a job skips stages or moves backwards unexpectedly.
 
 Scope note: a job progresses through downloading a video, running clip
-detection on it, and then editing the detected clips
-(queued → downloading → detecting → editing → complete). All stages are
-represented here; terminal states are complete and cancelled, with failed
-jobs eligible for re-queuing.
+detection on it, editing the detected clips, and burning captions onto them
+(queued → downloading → detecting → editing → captioning → complete). All
+stages are represented here; terminal states are complete and cancelled, with
+failed jobs eligible for re-queuing.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ class JobState(str, Enum):
     DOWNLOADING = "downloading"
     DETECTING = "detecting"
     EDITING = "editing"
+    CAPTIONING = "captioning"
     COMPLETE = "complete"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -32,7 +33,8 @@ VALID_TRANSITIONS: dict[JobState, list[JobState]] = {
     JobState.QUEUED: [JobState.DOWNLOADING, JobState.FAILED, JobState.CANCELLED],
     JobState.DOWNLOADING: [JobState.DETECTING, JobState.FAILED, JobState.CANCELLED],
     JobState.DETECTING: [JobState.EDITING, JobState.FAILED, JobState.CANCELLED],
-    JobState.EDITING: [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED],
+    JobState.EDITING: [JobState.CAPTIONING, JobState.FAILED, JobState.CANCELLED],
+    JobState.CAPTIONING: [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED],
     JobState.COMPLETE: [],
     JobState.FAILED: [JobState.QUEUED],  # Allow re-queuing a failed job.
     JobState.CANCELLED: [],
