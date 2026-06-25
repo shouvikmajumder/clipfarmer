@@ -33,3 +33,6 @@ data/logs/*
 
 # SQLite databases
 data/*.db
+
+# Worker singleton lock
+data/worker.lock

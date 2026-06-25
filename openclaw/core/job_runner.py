@@ -43,6 +43,7 @@ Jobs are processed one at a time, FIFO, oldest ``submitted_at`` first.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -125,7 +126,20 @@ class JobRunner:
         ``worker.job_poll_interval_s`` before checking again. Runs until
         interrupted (``KeyboardInterrupt`` is caught and triggers a graceful
         shutdown log).
+
+        Only one worker may run at a time: an exclusive lock on
+        ``data/worker.lock`` is held for the process lifetime. If another worker
+        already holds it, this logs an error and returns without processing —
+        the JSON state store has no atomic job claim, so two concurrent workers
+        would otherwise double-process and corrupt job state.
         """
+        lock_fd = self._acquire_worker_lock()
+        if lock_fd is None:
+            logger.error(
+                "Another JobRunner worker is already running (data/worker.lock "
+                "held); exiting to avoid double-processing the queue."
+            )
+            return
         try:
             for job in self._find_resumable_jobs():
                 logger.info(
@@ -143,6 +157,44 @@ class JobRunner:
                 self.process(job)
         except KeyboardInterrupt:
             logger.info("JobRunner interrupted, shutting down gracefully.")
+        finally:
+            self._release_worker_lock(lock_fd)
+
+    def _acquire_worker_lock(self):
+        """Acquire an exclusive, non-blocking lock so only one worker runs.
+
+        Returns an open file object holding the lock (kept open for the process
+        lifetime), or ``None`` if another worker already holds it.
+        """
+        import fcntl
+
+        state.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path = state.DATA_DIR / "worker.lock"
+        # Open append-mode so a failed acquirer never truncates the holder's PID
+        # ("w" truncates on open, before flock). Truncate+write only once we win.
+        fd = open(lock_path, "a+")
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fd.close()
+            return None
+        fd.seek(0)
+        fd.truncate()
+        fd.write(str(os.getpid()))
+        fd.flush()
+        return fd
+
+    @staticmethod
+    def _release_worker_lock(fd) -> None:
+        """Release and close the worker lock file (best-effort)."""
+        if fd is None:
+            return
+        import fcntl
+
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            fd.close()
 
     def _find_resumable_jobs(self) -> list[dict]:
         """Return all jobs whose state is not terminal, oldest submitted first.
@@ -574,7 +626,11 @@ class JobRunner:
             List of clip dicts that were successfully captioned (possibly
             empty: no clips, or a skipped profile).
         """
-        from processing.caption_burner import caption_clip, should_caption
+        from processing.caption_burner import (
+            caption_clip,
+            should_caption,
+            subtitles_filter_available,
+        )
         from processing.transcriber import transcribe_words
 
         job_id = job["id"]
@@ -586,6 +642,19 @@ class JobRunner:
         if not should_caption(profile):
             logger.info(
                 "Job %s: content profile %r skips captioning", job_id, profile
+            )
+            return []
+
+        # Burning captions needs ffmpeg's libass-backed `subtitles` filter, which
+        # many builds (e.g. current homebrew-core ffmpeg) omit. Rather than fail
+        # the job with a cryptic filtergraph error, skip captioning and keep the
+        # edited clips as the deliverable.
+        if not subtitles_filter_available():
+            logger.warning(
+                "Job %s: ffmpeg has no 'subtitles' filter (no libass) — skipping "
+                "captioning; edited clips are the final output. Install an ffmpeg "
+                "built with --enable-libass, or set OPENCLAW_FFMPEG to one.",
+                job_id,
             )
             return []
 

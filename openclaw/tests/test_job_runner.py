@@ -134,6 +134,12 @@ def _patch_pipeline(
     caption_mock.side_effect = caption_clip_side_effect or _default_caption
     patches["processing.caption_burner.caption_clip"] = caption_mock
 
+    # Assume ffmpeg has the subtitles (libass) filter unless a test overrides;
+    # otherwise _caption skips captioning on machines without libass.
+    patches["processing.caption_burner.subtitles_filter_available"] = MagicMock(
+        return_value=True
+    )
+
     return patches
 
 
@@ -1080,3 +1086,34 @@ def test_resume_into_captioning_runs_only_captioning(
     final_job = state.get_job(job_id)
     assert final_job["state"] == "complete"
     assert final_job["last_stage_completed"] == "captioning"
+
+
+def test_captioning_skipped_when_subtitles_filter_unavailable(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """If ffmpeg lacks the subtitles (libass) filter, captioning is skipped: no
+    caption_clip call, edited clips kept, and the job still COMPLETEs."""
+    job = _make_job()  # default profile → would normally caption
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    patches = _patch_pipeline(
+        download_return=str(video_file),
+        detect_return=[{"start_s": 1.0, "end_s": 20.0, "score": 0.9}],
+    )
+    # Simulate an ffmpeg without libass.
+    patches["processing.caption_burner.subtitles_filter_available"] = MagicMock(
+        return_value=False
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "complete"
+    assert final_job["last_stage_completed"] == "captioning"
+    patches["processing.caption_burner.caption_clip"].assert_not_called()
+
+    clips = state.get_clips_for_job(job["id"])
+    assert clips[0]["file_path"].endswith("clip_0_edited.mp4")
