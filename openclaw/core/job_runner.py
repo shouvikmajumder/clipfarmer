@@ -3,9 +3,9 @@ and edits each detected clip to vertical format.
 
 ``JobRunner`` owns the main processing loop. It is designed to run as a
 long-lived process, continuously polling ``state.get_next_queued_job()`` and
-driving each job through the full four-stage pipeline:
+driving each job through the full five-stage pipeline:
 
-    queued -> downloading -> detecting -> editing -> captioning -> complete
+    queued -> downloading -> detecting -> editing -> captioning -> formatting -> complete
 
 Stage summary:
 
@@ -32,6 +32,13 @@ Stage summary:
   skip captioning entirely. Captioned clips are written to
   ``data/jobs/<job_id>/clips/clip_<idx>_captioned.mp4`` and ``file_path`` is
   updated. Idempotent: already-captioned outputs are skipped on crash-resume.
+
+- **formatting**: mixes royalty-free background music under each clip using
+  ``processing.format_music``. Only the ``podcast`` (12%) and ``irl`` (15%)
+  profiles get music; others skip. Final clips are written to
+  ``data/jobs/<job_id>/clips/clip_<idx>_final.mp4`` and ``file_path`` is
+  updated. If the music folder is missing/empty the clip is copied through
+  unchanged. Idempotent on crash-resume.
 
 Resumption is supported at all stage boundaries: if a crash left
 ``last_stage_completed`` at any earlier stage, the runner skips the completed
@@ -92,15 +99,17 @@ class JobRunner:
       the crash, skip it and continue from the next stage.
     """
 
-    # Canonical four-stage pipeline order. Used to compute crash-recovery
+    # Canonical five-stage pipeline order. Used to compute crash-recovery
     # resume points.
-    STAGE_ORDER: list[str] = ["downloading", "detecting", "editing", "captioning"]
+    STAGE_ORDER: list[str] = [
+        "downloading", "detecting", "editing", "captioning", "formatting",
+    ]
 
     def __init__(self) -> None:
         """Initialise the runner, loading worker settings from settings.yaml.
 
         Drives each queued job through the full pipeline:
-        downloading -> detecting -> editing -> complete.
+        downloading -> detecting -> editing -> captioning -> formatting -> complete.
         """
         settings = _load_settings()
         worker_settings = settings.get("worker", {}) or {}
@@ -329,6 +338,13 @@ class JobRunner:
                 state.update_job_stage(job_id, "captioning")
                 self._caption(job)
                 state.mark_stage_complete(job_id, "captioning")
+
+            # --- formatting (background music) ---
+            # Operates on the captioned/edited clip files; needs no source video.
+            if resume_index <= self.STAGE_ORDER.index("formatting"):
+                state.update_job_stage(job_id, "formatting")
+                self._format(job)
+                state.mark_stage_complete(job_id, "formatting")
 
             state.mark_job_complete(job_id)
 
@@ -695,5 +711,80 @@ class JobRunner:
 
         if eligible and not succeeded:
             raise RuntimeError("all clips failed during captioning")
+
+        return succeeded
+
+    def _format(self, job: dict) -> list[dict]:
+        """Mix background music under each clip (the final formatting stage).
+
+        Only the ``podcast`` and ``irl`` content profiles get music
+        (``format_music.should_add_music``); for ``interview``/``gaming``/
+        ``default`` this is a no-op and each clip keeps its captioned/edited
+        ``file_path``.
+
+        For music profiles, each clip's ``file_path`` is mixed to
+        ``clips/clip_<idx>_final.mp4`` and ``file_path`` is updated. When the
+        profile's music folder is missing/empty, ``add_music`` copies the clip
+        through unchanged (logged), so the job still completes. Per-clip
+        failures are isolated; if every eligible clip fails the job is failed.
+        ``add_music``'s cache guard keeps a crash-resumed re-run idempotent.
+
+        Args:
+            job: Job metadata dict.
+
+        Returns:
+            List of clip dicts that were successfully formatted (possibly empty:
+            no clips, or a no-music profile).
+        """
+        from processing.format_music import add_music, should_add_music
+
+        job_id = job["id"]
+
+        settings = _load_settings()
+        default_profile = (settings.get("editing") or {}).get("default_profile", "default")
+        profile = (job.get("options") or {}).get("content_profile", default_profile)
+
+        if not should_add_music(profile):
+            logger.info(
+                "Job %s: content profile %r gets no background music; skipping formatting",
+                job_id,
+                profile,
+            )
+            return []
+
+        clips = state.get_clips_for_job(job_id)
+        if not clips:
+            logger.info("Job %s: no clips to format", job_id)
+            return []
+
+        clips_dir = state.JOBS_DIR / job_id / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+
+        succeeded: list[dict] = []
+        eligible = 0
+        for idx, clip in enumerate(clips):
+            src = clip.get("file_path")
+            if not src:
+                continue
+            eligible += 1
+            output_path = str(clips_dir / f"clip_{idx}_final.mp4")
+            duration = (clip.get("end_s") or 0.0) - (clip.get("start_s") or 0.0)
+            try:
+                add_music(src, output_path, profile, duration)
+            except Exception as exc:  # noqa: BLE001 - isolate per-clip failures
+                logger.error(
+                    "Job %s: clip %d failed during formatting, skipping: %s",
+                    job_id,
+                    idx,
+                    exc,
+                )
+                continue
+            clip["file_path"] = output_path
+            succeeded.append(clip)
+
+        state.save_clips(job_id, clips)
+
+        if eligible and not succeeded:
+            raise RuntimeError("all clips failed during formatting")
 
         return succeeded

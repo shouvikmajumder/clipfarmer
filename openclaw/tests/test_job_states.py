@@ -5,13 +5,15 @@ import pytest
 from core.job_states import JobState, VALID_TRANSITIONS, assert_valid_transition
 
 
-# Linear pipeline: queued → downloading → detecting → editing → captioning → complete.
+# Linear pipeline: queued → downloading → detecting → editing → captioning →
+# formatting → complete.
 PIPELINE_ORDER = [
     JobState.QUEUED,
     JobState.DOWNLOADING,
     JobState.DETECTING,
     JobState.EDITING,
     JobState.CAPTIONING,
+    JobState.FORMATTING,
     JobState.COMPLETE,
 ]
 
@@ -21,6 +23,7 @@ NON_TERMINAL_STATES = [
     JobState.DETECTING,
     JobState.EDITING,
     JobState.CAPTIONING,
+    JobState.FORMATTING,
 ]
 
 TERMINAL_STATES = [JobState.COMPLETE, JobState.FAILED, JobState.CANCELLED]
@@ -50,9 +53,20 @@ def test_editing_to_captioning_is_valid():
     assert_valid_transition(JobState.EDITING, JobState.CAPTIONING)  # should not raise
 
 
-def test_captioning_to_complete_is_valid():
-    """The captioning stage transitions cleanly to complete."""
-    assert_valid_transition(JobState.CAPTIONING, JobState.COMPLETE)  # should not raise
+def test_captioning_to_formatting_is_valid():
+    """Captioning now flows into the formatting (music) stage."""
+    assert_valid_transition(JobState.CAPTIONING, JobState.FORMATTING)  # should not raise
+
+
+def test_formatting_to_complete_is_valid():
+    """The formatting stage transitions cleanly to complete."""
+    assert_valid_transition(JobState.FORMATTING, JobState.COMPLETE)  # should not raise
+
+
+def test_captioning_to_complete_is_invalid():
+    """Skipping the formatting stage (captioning → complete) must now be rejected."""
+    with pytest.raises(ValueError):
+        assert_valid_transition(JobState.CAPTIONING, JobState.COMPLETE)
 
 
 def test_editing_to_complete_is_invalid():

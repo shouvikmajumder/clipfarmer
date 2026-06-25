@@ -54,6 +54,7 @@ def _patch_pipeline(
     edit_clip_side_effect=None,
     transcribe_words_return=None,
     caption_clip_side_effect=None,
+    add_music_side_effect=None,
 ):
     """Build a dict of patch targets -> behaviours for the three-stage pipeline.
 
@@ -140,6 +141,15 @@ def _patch_pipeline(
         return_value=True
     )
 
+    # Formatting stage — lazily imported by _format. Default: echo the output
+    # path back (so file_path becomes the _final.mp4) without running FFmpeg.
+    def _default_add_music(clip_path, output_path, profile, duration_s, music_dir=None):
+        return output_path
+
+    add_music_mock = MagicMock()
+    add_music_mock.side_effect = add_music_side_effect or _default_add_music
+    patches["processing.format_music.add_music"] = add_music_mock
+
     return patches
 
 
@@ -175,8 +185,8 @@ def test_full_pipeline_reaches_complete(runner: JobRunner):
     assert final_job["state"] == "complete"
     assert final_job["youtube_id"] == "abc123"
     assert final_job["video_title"] == "Test Video"
-    # All four stages must have completed; the last one recorded is "captioning".
-    assert final_job["last_stage_completed"] == "captioning"
+    # All five stages must have completed; the last one recorded is "formatting".
+    assert final_job["last_stage_completed"] == "formatting"
 
     patches["processing.downloader.download"].assert_called_once()
     patches["processing.clip_detector.detect"].assert_called_once()
@@ -682,8 +692,8 @@ def test_crash_resume_into_detecting_with_missing_video_fails_job(
 
 
 def test_state_passes_through_all_processing_stages(runner: JobRunner, isolated_jobs_dir: Path):
-    """process() must move through 'detecting', 'editing' AND 'captioning', and the
-    final job must have last_stage_completed == 'captioning'."""
+    """process() must move through detecting, editing, captioning AND formatting,
+    ending with last_stage_completed == 'formatting'."""
     job = _make_job()
     video_file = _make_fake_video(isolated_jobs_dir, job["id"])
 
@@ -713,12 +723,12 @@ def test_state_passes_through_all_processing_stages(runner: JobRunner, isolated_
     finally:
         _stop_patches(ctxs)
 
-    for stage in ("downloading", "detecting", "editing", "captioning"):
+    for stage in ("downloading", "detecting", "editing", "captioning", "formatting"):
         assert stage in stage_updates
         assert stage in stage_completions
 
     final_job = state.get_job(job["id"])
-    assert final_job["last_stage_completed"] == "captioning"
+    assert final_job["last_stage_completed"] == "formatting"
 
 
 # ---------------------------------------------------------------------------
@@ -901,8 +911,8 @@ def test_resume_into_editing_runs_only_editing(
 
     final_job = state.get_job(job_id)
     assert final_job["state"] == "complete"
-    # Resuming at editing also runs the subsequent captioning stage.
-    assert final_job["last_stage_completed"] == "captioning"
+    # Resuming at editing also runs the subsequent captioning + formatting stages.
+    assert final_job["last_stage_completed"] == "formatting"
 
 
 def test_crash_resume_into_editing_with_missing_video_fails_job(
@@ -954,6 +964,10 @@ def test_get_resume_index_after_detecting_editing_captioning(runner: JobRunner):
 
     state.mark_stage_complete(job_id, "captioning")
     job = state.get_job(job_id)
+    assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("formatting")
+
+    state.mark_stage_complete(job_id, "formatting")
+    job = state.get_job(job_id)
     assert runner.get_resume_index(job) == len(JobRunner.STAGE_ORDER)
 
 
@@ -967,10 +981,19 @@ def _make_job_with_profile(profile: str, youtube_url: str = "https://www.youtube
     return state.get_job(job_id)
 
 
-@pytest.mark.parametrize("profile", ["gaming", "irl"])
-def test_profile_skips_captioning(runner: JobRunner, isolated_jobs_dir: Path, profile: str):
-    """The gaming and irl profiles must skip captioning entirely: caption_clip is
-    never called and each clip keeps its edited file_path; the job still COMPLETEs."""
+@pytest.mark.parametrize(
+    "profile,music,final_suffix",
+    [
+        ("gaming", False, "clip_0_edited.mp4"),   # no captions, no music
+        ("irl", True, "clip_0_final.mp4"),         # no captions, but music
+    ],
+)
+def test_profile_skips_captioning(
+    runner: JobRunner, isolated_jobs_dir: Path, profile: str, music: bool, final_suffix: str
+):
+    """gaming/irl skip captioning (caption_clip never called); the job still
+    COMPLETEs at formatting. irl additionally gets music (file → _final.mp4),
+    gaming gets neither (file stays _edited.mp4)."""
     job = _make_job_with_profile(profile)
     video_file = _make_fake_video(isolated_jobs_dir, job["id"])
 
@@ -986,13 +1009,15 @@ def test_profile_skips_captioning(runner: JobRunner, isolated_jobs_dir: Path, pr
 
     final_job = state.get_job(job["id"])
     assert final_job["state"] == "complete"
-    assert final_job["last_stage_completed"] == "captioning"
+    assert final_job["last_stage_completed"] == "formatting"
 
-    # Captioning was skipped for this profile.
+    # Captioning was skipped for both profiles.
     patches["processing.caption_burner.caption_clip"].assert_not_called()
+    # Music only for irl.
+    assert patches["processing.format_music.add_music"].call_count == (1 if music else 0)
 
     clips = state.get_clips_for_job(job["id"])
-    assert clips[0]["file_path"].endswith("clip_0_edited.mp4")
+    assert clips[0]["file_path"].endswith(final_suffix)
 
 
 def test_captioning_persists_captioned_file_path(
@@ -1085,7 +1110,8 @@ def test_resume_into_captioning_runs_only_captioning(
 
     final_job = state.get_job(job_id)
     assert final_job["state"] == "complete"
-    assert final_job["last_stage_completed"] == "captioning"
+    # Resuming at captioning also runs the subsequent formatting stage.
+    assert final_job["last_stage_completed"] == "formatting"
 
 
 def test_captioning_skipped_when_subtitles_filter_unavailable(
@@ -1112,8 +1138,129 @@ def test_captioning_skipped_when_subtitles_filter_unavailable(
 
     final_job = state.get_job(job["id"])
     assert final_job["state"] == "complete"
-    assert final_job["last_stage_completed"] == "captioning"
+    assert final_job["last_stage_completed"] == "formatting"
     patches["processing.caption_burner.caption_clip"].assert_not_called()
 
+    # default profile gets no music either, so the edited clip remains final.
     clips = state.get_clips_for_job(job["id"])
     assert clips[0]["file_path"].endswith("clip_0_edited.mp4")
+
+
+# ---------------------------------------------------------------------------
+# Formatting stage (background music)
+# ---------------------------------------------------------------------------
+
+
+def test_formatting_persists_final_path_for_music_profile(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """A music profile (podcast) mixes each clip to clip_<idx>_final.mp4 and
+    rewrites file_path; add_music runs once per clip."""
+    two_clips = [
+        {"start_s": 10.0, "end_s": 40.0, "score": 0.85},
+        {"start_s": 60.0, "end_s": 90.0, "score": 0.72},
+    ]
+    job = _make_job_with_profile("podcast")
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    patches = _patch_pipeline(download_return=str(video_file), detect_return=two_clips)
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "complete"
+    assert final_job["last_stage_completed"] == "formatting"
+
+    clips = state.get_clips_for_job(job["id"])
+    assert len(clips) == 2
+    for idx, clip in enumerate(clips):
+        assert clip["file_path"].endswith(f"clip_{idx}_final.mp4")
+    assert patches["processing.format_music.add_music"].call_count == 2
+    # duration passed through as end_s - start_s (30.0 for both)
+    _, _, _, duration = patches["processing.format_music.add_music"].call_args[0]
+    assert duration == 30.0
+
+
+def test_default_profile_skips_formatting(runner: JobRunner, isolated_jobs_dir: Path):
+    """default profile gets no music: add_music is never called and the job still
+    completes at the formatting stage."""
+    job = _make_job()  # default profile
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    patches = _patch_pipeline(
+        download_return=str(video_file),
+        detect_return=[{"start_s": 1.0, "end_s": 20.0, "score": 0.9}],
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "complete"
+    assert final_job["last_stage_completed"] == "formatting"
+    patches["processing.format_music.add_music"].assert_not_called()
+
+
+def test_all_clips_fail_formatting_marks_job_failed(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """If add_music raises for every clip, the job is marked FAILED."""
+    job = _make_job_with_profile("podcast")
+    video_file = _make_fake_video(isolated_jobs_dir, job["id"])
+
+    patches = _patch_pipeline(
+        download_return=str(video_file),
+        detect_return=[{"start_s": 1.0, "end_s": 20.0, "score": 0.9}],
+        add_music_side_effect=RuntimeError("ffmpeg music mix boom"),
+    )
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    final_job = state.get_job(job["id"])
+    assert final_job["state"] == "failed"
+    assert "all clips failed during formatting" in final_job["error_message"]
+
+
+def test_resume_into_formatting_runs_only_formatting(
+    runner: JobRunner, isolated_jobs_dir: Path
+):
+    """Resuming a job whose captioning stage already completed must run ONLY
+    formatting — download, detect, edit, and caption must not be called."""
+    job_id = state.enqueue_job(
+        "https://www.youtube.com/watch?v=rfmt", options={"content_profile": "podcast"}
+    )
+    state.update_job_metadata(
+        job_id, youtube_id="rfmt", video_title="Rfmt", video_duration_s=120
+    )
+    state.add_clip(
+        job_id, {"start_s": 1.0, "end_s": 20.0, "score": 0.9, "file_path": "/x/clip_0_captioned.mp4"}
+    )
+    state.mark_stage_complete(job_id, "captioning")
+    job = state.get_job(job_id)
+
+    assert runner.get_resume_index(job) == JobRunner.STAGE_ORDER.index("formatting")
+
+    patches = _patch_pipeline()
+    ctxs = _apply_patches(patches)
+    try:
+        runner.process(job)
+    finally:
+        _stop_patches(ctxs)
+
+    patches["processing.downloader.download"].assert_not_called()
+    patches["processing.clip_detector.detect"].assert_not_called()
+    patches["processing.editor.edit_clip"].assert_not_called()
+    patches["processing.caption_burner.caption_clip"].assert_not_called()
+    assert patches["processing.format_music.add_music"].call_count == 1
+
+    final_job = state.get_job(job_id)
+    assert final_job["state"] == "complete"
+    assert final_job["last_stage_completed"] == "formatting"
