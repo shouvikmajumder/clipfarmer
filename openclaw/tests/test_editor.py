@@ -61,7 +61,7 @@ def test_podcast_profile_contains_correct_filter_chain():
     assert args[0] == "-vf"
     vf = args[1]
     assert "scale=iw*1.15:ih*1.15" in vf
-    assert "crop=ih*9/16:ih" in vf
+    assert r"crop=min(iw\,ih*9/16):min(ih\,iw*16/9)" in vf
     assert "scale=608:1080" in vf
 
 
@@ -116,7 +116,7 @@ def test_irl_profile_contains_base_pipeline():
     args = editor.build_filter_args("irl")
     vf = args[1]
     assert "scale=iw*1.15:ih*1.15" in vf
-    assert "crop=ih*9/16:ih" in vf
+    assert r"crop=min(iw\,ih*9/16):min(ih\,iw*16/9)" in vf
     assert "scale=608:1080" in vf
 
 

@@ -41,6 +41,16 @@ TARGET_WIDTH = 608
 TARGET_HEIGHT = 1080
 
 # ---------------------------------------------------------------------------
+# Aspect-safe 9:16 crop width:height expression.
+# Clamps the crop region to the input's own dimensions via min(), so a source
+# that is narrower than 9:16 (portrait/vertical input) crops by height instead
+# of erroring out (crop width > input width). The commas inside min() are
+# escaped \, so the filtergraph parser doesn't read them as filter separators
+# (same technique as caption_burner.build_burn_cmd). x/y default to centre.
+# ---------------------------------------------------------------------------
+CROP_9_16_WH = r"min(iw\,ih*9/16):min(ih\,iw*16/9)"
+
+# ---------------------------------------------------------------------------
 # Horizontal crop-bias expressions for the interview profile.
 # These are FFmpeg expression strings for the x-offset argument of the crop
 # filter, where ow is the crop output width.
@@ -99,17 +109,17 @@ def build_filter_args(
         normalised = "default"
 
     if normalised in ("podcast", "default"):
-        # Zoom in 15% to add headroom, then center-crop to exact 9:16
-        # (FFmpeg's crop centers by default when x/y are omitted), then scale
-        # to the 608x1080 target.
-        vf = "scale=iw*1.15:ih*1.15,crop=ih*9/16:ih,scale=608:1080"
+        # Zoom in 15% to add headroom, then center-crop to exact 9:16 (the
+        # aspect-safe expression clamps to the input so portrait sources don't
+        # error), then scale to the 608x1080 target.
+        vf = f"scale=iw*1.15:ih*1.15,crop={CROP_9_16_WH},scale=608:1080"
         return ["-vf", vf]
 
     if normalised == "interview":
         # Same zoom as podcast, but the crop x-offset is controlled by
         # crop_bias so an off-center speaker stays in frame.
         xbias = CROP_BIAS.get(crop_bias, CROP_BIAS["center"])
-        vf = f"scale=iw*1.15:ih*1.15,crop=ih*9/16:ih:{xbias}:0,scale=608:1080"
+        vf = f"scale=iw*1.15:ih*1.15,crop={CROP_9_16_WH}:{xbias}:0,scale=608:1080"
         return ["-vf", vf]
 
     if normalised == "irl":
@@ -117,7 +127,7 @@ def build_filter_args(
         # filter, which helps outdoor/run-and-gun footage look more polished.
         vf = (
             "scale=iw*1.15:ih*1.15,"
-            "crop=ih*9/16:ih,"
+            f"crop={CROP_9_16_WH},"
             "scale=608:1080,"
             "eq=contrast=1.05:saturation=1.15"
         )
