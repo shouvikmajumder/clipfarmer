@@ -250,6 +250,10 @@ def caption_clip(
     *output_path* already exists and is non-empty, the SRT is not written and
     FFmpeg is not invoked (safe to retry a partially-completed job).
 
+    If *words* produces an empty SRT (a silent/music-only clip, or Whisper
+    found nothing), the clip is copied through to *output_path* unchanged — no
+    SRT is written and FFmpeg is not invoked.
+
     Per-clip retry/skip policy lives in ``core/job_runner.py``.
 
     Args:
@@ -270,6 +274,7 @@ def caption_clip(
         RuntimeError: If FFmpeg exits with a non-zero return code.  The
             intermediate ``.srt`` file is left on disk to aid debugging.
     """
+    import shutil
     import subprocess
 
     # Cache guard: idempotent retry — skip everything if output already exists.
@@ -280,8 +285,19 @@ def caption_clip(
         )
         return output_path
 
-    # Write the SRT subtitle file.
+    # Build the SRT first: a clip with no words (silent/music-only, or Whisper
+    # found nothing) yields an empty SRT. Burning that is a degenerate ffmpeg
+    # call, so copy the clip through unchanged instead.
     srt_content = words_to_srt(words, offset_s)
+    if not srt_content.strip():
+        logger.info(
+            "caption_clip: no words for %r; copying clip through without captions.",
+            input_path,
+        )
+        shutil.copyfile(input_path, output_path)
+        return output_path
+
+    # Write the SRT subtitle file.
     with open(srt_path, "w", encoding="utf-8") as f:
         f.write(srt_content)
 

@@ -393,3 +393,27 @@ def test_subtitles_filter_available_false_when_absent(monkeypatch):
 def test_subtitles_filter_available_false_on_error(monkeypatch):
     monkeypatch.setattr(subprocess, "run", MagicMock(side_effect=FileNotFoundError("no ffmpeg")))
     assert caption_burner.subtitles_filter_available("ffmpeg") is False
+
+
+# ---------------------------------------------------------------------------
+# Empty / wordless clip — copy through instead of a degenerate burn
+# ---------------------------------------------------------------------------
+
+
+def test_caption_clip_empty_words_copies_through(tmp_path, monkeypatch):
+    """A clip with no words must be copied through unchanged: no SRT written,
+    no FFmpeg call."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"original-clip-bytes")
+    srt_path = tmp_path / "clip_0.srt"
+    output_path = tmp_path / "clip_0_captioned.mp4"
+
+    run_mock = MagicMock(side_effect=AssertionError("subprocess.run must not be called"))
+    monkeypatch.setattr(subprocess, "run", run_mock)
+
+    result = caption_burner.caption_clip(str(clip), [], str(srt_path), str(output_path))
+
+    assert result == str(output_path)
+    assert output_path.read_bytes() == b"original-clip-bytes"
+    assert not srt_path.exists()
+    run_mock.assert_not_called()
