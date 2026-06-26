@@ -121,6 +121,11 @@ def build_mix_cmd(
         ffmpeg_bin,
         "-y",
         "-i", clip_path,
+        # Loop the music input so a track shorter than the clip still covers it
+        # (no trailing silence); atrim + amix=duration=first cap it to the clip.
+        # -stream_loop is an input option: it applies only to the music input
+        # that follows, not the clip above.
+        "-stream_loop", "-1",
         "-i", music_path,
         "-filter_complex", filter_complex,
         "-map", "0:v",

@@ -83,6 +83,14 @@ def test_build_mix_cmd_structure():
     # inputs in order: clip is 0, music is 1
     assert cmd.index("clip.mp4") < cmd.index("track.mp3")
 
+    # music input is looped so a short track still covers the clip; -stream_loop
+    # is an input option and must sit between the clip input and the music -i.
+    music_i = cmd.index("track.mp3")
+    sl = cmd.index("-stream_loop")
+    assert cmd[sl + 1] == "-1"
+    assert cmd.index("clip.mp4") < sl < music_i
+    assert cmd[music_i - 1] == "-i"            # music_path directly follows its -i
+
     fc = cmd[cmd.index("-filter_complex") + 1]
     assert "atrim=end=20.000" in fc
     assert "volume=0.12" in fc
