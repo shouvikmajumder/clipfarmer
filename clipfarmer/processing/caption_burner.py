@@ -27,11 +27,11 @@ logger = logging.getLogger(__name__)
 def _ffmpeg_bin() -> str:
     """The ffmpeg binary to invoke.
 
-    Defaults to ``ffmpeg`` on PATH; override with the ``OPENCLAW_FFMPEG`` env var
+    Defaults to ``ffmpeg`` on PATH; override with the ``CLIPFARMER_FFMPEG`` env var
     to point at a build that includes the ``subtitles`` (libass) filter, which
     homebrew-core's ffmpeg no longer bundles.
     """
-    return os.environ.get("OPENCLAW_FFMPEG", "ffmpeg")
+    return os.environ.get("CLIPFARMER_FFMPEG", "ffmpeg")
 
 
 def subtitles_filter_available(ffmpeg_bin: str | None = None) -> bool:

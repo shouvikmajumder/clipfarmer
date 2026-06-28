@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 # Root of all job data. Resolved relative to this file so it works regardless
-# of the caller's current working directory: openclaw/processing/downloader.py -> openclaw/data
+# of the caller's current working directory: clipfarmer/processing/downloader.py -> clipfarmer/data
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 JOBS_DIR = DATA_DIR / "jobs"
 

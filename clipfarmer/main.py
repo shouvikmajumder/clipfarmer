@@ -10,7 +10,7 @@ arguments, skips the enqueue step and starts the JobRunner loop directly so
 the worker can run standalone (e.g. alongside the web UI, which enqueues jobs
 itself via core.state.enqueue_job).
 
-Must be run with ``openclaw/`` as the working directory (e.g. ``cd openclaw
+Must be run with ``clipfarmer/`` as the working directory (e.g. ``cd clipfarmer
 && python main.py``), matching the rest of the codebase's import convention.
 """
 

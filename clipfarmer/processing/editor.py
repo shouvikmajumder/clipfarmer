@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 def _ffmpeg_bin() -> str:
-    """The ffmpeg binary to invoke (override with the ``OPENCLAW_FFMPEG`` env var)."""
-    return os.environ.get("OPENCLAW_FFMPEG", "ffmpeg")
+    """The ffmpeg binary to invoke (override with the ``CLIPFARMER_FFMPEG`` env var)."""
+    return os.environ.get("CLIPFARMER_FFMPEG", "ffmpeg")
 
 # ---------------------------------------------------------------------------
 # Target resolution (9:16 at 1080p short-form vertical)

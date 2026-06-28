@@ -63,7 +63,7 @@ from core.url_validator import validate_url
 
 logger = logging.getLogger(__name__)
 
-# Path to settings.yaml relative to this file: openclaw/core/job_runner.py -> openclaw/config
+# Path to settings.yaml relative to this file: clipfarmer/core/job_runner.py -> clipfarmer/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 # Terminal job states — these are excluded from crash-recovery resumption.
@@ -669,7 +669,7 @@ class JobRunner:
             logger.warning(
                 "Job %s: ffmpeg has no 'subtitles' filter (no libass) — skipping "
                 "captioning; edited clips are the final output. Install an ffmpeg "
-                "built with --enable-libass, or set OPENCLAW_FFMPEG to one.",
+                "built with --enable-libass, or set CLIPFARMER_FFMPEG to one.",
                 job_id,
             )
             return []

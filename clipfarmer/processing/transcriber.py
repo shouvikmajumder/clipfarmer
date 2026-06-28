@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-# Path to settings.yaml relative to this file: openclaw/processing/transcriber.py -> openclaw/config
+# Path to settings.yaml relative to this file: clipfarmer/processing/transcriber.py -> clipfarmer/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 # mlx-whisper resolves these as Hugging Face repo ids (or local paths), NOT the

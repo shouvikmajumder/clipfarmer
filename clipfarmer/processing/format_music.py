@@ -40,13 +40,13 @@ MUSIC_VOLUME_BY_PROFILE: dict[str, float] = {
     "irl": 0.15,
 }
 
-# Root of the music library: openclaw/assets/music/<profile>/*.mp3
+# Root of the music library: clipfarmer/assets/music/<profile>/*.mp3
 MUSIC_DIR = Path(__file__).resolve().parent.parent / "assets" / "music"
 
 
 def _ffmpeg_bin() -> str:
-    """The ffmpeg binary to invoke (override with the ``OPENCLAW_FFMPEG`` env var)."""
-    return os.environ.get("OPENCLAW_FFMPEG", "ffmpeg")
+    """The ffmpeg binary to invoke (override with the ``CLIPFARMER_FFMPEG`` env var)."""
+    return os.environ.get("CLIPFARMER_FFMPEG", "ffmpeg")
 
 
 def should_add_music(profile: str) -> bool:

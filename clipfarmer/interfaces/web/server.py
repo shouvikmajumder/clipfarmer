@@ -8,7 +8,7 @@ This module is an *alternative* entry point to the existing CLI
 (``python main.py <url>``). It does not implement any job processing logic
 itself and is intentionally not wired into ``main.py`` — run it directly:
 
-    cd openclaw
+    cd clipfarmer
     python interfaces/web/server.py
 
 The import of ``enqueue_job`` is wrapped defensively in case ``core/state.py``
@@ -24,12 +24,12 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 
 # Running this file directly (``python interfaces/web/server.py``) puts only
-# this file's own directory on sys.path, not the openclaw/ package root, so
+# this file's own directory on sys.path, not the clipfarmer/ package root, so
 # ``core`` would not be importable regardless of the caller's cwd. Add the
-# openclaw/ root explicitly so the import below always works.
-_OPENCLAW_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_OPENCLAW_ROOT) not in sys.path:
-    sys.path.insert(0, str(_OPENCLAW_ROOT))
+# clipfarmer/ root explicitly so the import below always works.
+_CLIPFARMER_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_CLIPFARMER_ROOT) not in sys.path:
+    sys.path.insert(0, str(_CLIPFARMER_ROOT))
 
 try:
     from core.state import enqueue_job
