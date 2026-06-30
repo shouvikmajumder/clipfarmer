@@ -10,23 +10,23 @@
   }
 
   function render(job) {
-    const youtubeId = job.youtube_id;
     const title = job.video_title || "Untitled video";
     const clipCount = job.clip_count || 0;
     const jobId = job.job_id;
 
-    const thumbSrc = youtubeId
-      ? "https://img.youtube.com/vi/" + youtubeId + "/hqdefault.jpg"
-      : "";
+    const clipMsg = clipCount > 0
+      ? clipCount + " clip" + (clipCount === 1 ? "" : "s") + " detected"
+      : "No clips detected — full video below";
 
     content.innerHTML =
       '<div class="video-card">' +
-        (thumbSrc ? '<img class="video-thumbnail" src="' + thumbSrc + '" alt="Video thumbnail" />' : "") +
-        '<div class="video-info">' +
-          '<h2 class="video-title">' + escapeHtml(title) + "</h2>" +
-          '<p class="clip-count">' + clipCount + " clip" + (clipCount === 1 ? "" : "s") + " detected</p>" +
-          '<a class="download-link" href="/jobs/' + jobId + '/video" target="_blank">Watch / download video</a>' +
-        "</div>" +
+        '<h2 class="video-title">' + escapeHtml(title) + "</h2>" +
+        '<p class="clip-count">' + escapeHtml(clipMsg) + "</p>" +
+        '<video class="video-player" controls preload="metadata">' +
+          '<source src="/jobs/' + jobId + '/video" type="video/mp4" />' +
+          "Your browser does not support the video tag." +
+        "</video>" +
+        '<a class="download-link" href="/jobs/' + jobId + '/video" download>Download video</a>' +
       "</div>";
   }
 

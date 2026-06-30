@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-# Path to settings.yaml relative to this file: openclaw/processing/formatter.py -> openclaw/config
+# Path to settings.yaml relative to this file: datapipeline/processing/formatter.py -> datapipeline/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 DEFAULT_MAX_CLIP_LENGTH_S = 60

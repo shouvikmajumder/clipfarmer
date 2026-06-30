@@ -41,7 +41,7 @@ from core.url_validator import validate_url
 
 logger = logging.getLogger(__name__)
 
-# Path to settings.yaml relative to this file: openclaw/core/job_runner.py -> openclaw/config
+# Path to settings.yaml relative to this file: datapipeline/core/job_runner.py -> datapipeline/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 # Terminal job states — these are excluded from crash-recovery resumption.
@@ -226,7 +226,8 @@ class JobRunner:
                 state.mark_stage_complete(job_id, "downloading")
 
             # --- detecting ---
-            if resume_index <= self.STAGE_ORDER.index("detecting"):
+            download_only = (job.get("options") or {}).get("download_only", False)
+            if not download_only and resume_index <= self.STAGE_ORDER.index("detecting"):
                 if video_path is None:  # crash-resume into detecting
                     video_path = self._locate_video(job)
                     if video_path is None:
@@ -373,8 +374,22 @@ class JobRunner:
             f_comments = executor.submit(fetch_comments, youtube_id)
             f_audio = executor.submit(_audio)
 
-            transcript = f_transcript.result()
-            comments = f_comments.result()
+            try:
+                transcript = f_transcript.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Job %s: transcript fetch failed, skipping: %s", job["id"], exc
+                )
+                transcript = None
+
+            try:
+                comments = f_comments.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Job %s: comment fetch failed, skipping: %s", job["id"], exc
+                )
+                comments = []
+
             audio = f_audio.result()
 
         logger.info(

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Starts the clipfarmer.bot worker (openclaw/main.py, no-arg mode) and the
-# web UI (openclaw/interfaces/web/server.py) concurrently, regardless of the
+# Starts the clipfarmer.bot worker (datapipeline/main.py, no-arg mode) and the
+# web UI (datapipeline/interfaces/web/server.py) concurrently, regardless of the
 # caller's current working directory.
 #
 # Usage: ./start.sh
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OPENCLAW_DIR="${SCRIPT_DIR}/openclaw"
+DATAPIPELINE_DIR="${SCRIPT_DIR}/datapipeline"
 
 cleanup() {
     echo ""
@@ -25,10 +25,10 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
-(cd "${OPENCLAW_DIR}" && python main.py) &
+(cd "${DATAPIPELINE_DIR}" && python main.py) &
 WORKER_PID=$!
 
-(cd "${OPENCLAW_DIR}" && python interfaces/web/server.py) &
+(cd "${DATAPIPELINE_DIR}" && python interfaces/web/server.py) &
 WEB_PID=$!
 
 echo "clipfarmer.bot started:"

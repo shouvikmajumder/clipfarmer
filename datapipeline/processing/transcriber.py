@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-# Path to settings.yaml relative to this file: openclaw/processing/transcriber.py -> openclaw/config
+# Path to settings.yaml relative to this file: datapipeline/processing/transcriber.py -> datapipeline/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 DEFAULT_WHISPER_MODEL = "medium"

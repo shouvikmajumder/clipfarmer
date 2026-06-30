@@ -22,7 +22,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # Path to settings.yaml relative to this file:
-# openclaw/processing/transcript_fetcher.py -> openclaw/config
+# datapipeline/processing/transcript_fetcher.py -> datapipeline/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 

@@ -311,17 +311,7 @@ input:focus-visible {
   overflow: hidden;
   box-shadow: 0 4px 24px rgba(0,0,0,0.07);
   margin-bottom: 24px;
-}
-
-.video-thumbnail {
-  width: 100%;
-  display: block;
-  aspect-ratio: 16/9;
-  object-fit: cover;
-}
-
-.video-info {
-  padding: 16px 20px;
+  padding: 20px;
 }
 
 .video-title {
@@ -332,14 +322,22 @@ input:focus-visible {
 }
 
 .clip-count {
-  margin: 0;
+  margin: 0 0 16px;
   font-size: 0.9rem;
   color: var(--text-muted);
 }
 
+.video-player {
+  width: 100%;
+  display: block;
+  border-radius: 8px;
+  background: #000;
+  max-height: 480px;
+}
+
 .download-link {
   display: inline-block;
-  margin-top: 12px;
+  margin-top: 14px;
   padding: 9px 18px;
   background: linear-gradient(100deg, var(--accent-primary), var(--accent-secondary));
   color: #fff;
