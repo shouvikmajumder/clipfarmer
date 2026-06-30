@@ -73,8 +73,12 @@
         if (data.state === "complete") {
           clearInterval(pollTimer);
           pollTimer = null;
-          resultLink.href = "/jobs/" + jobId;
-          resultLink.hidden = false;
+          if (data.clip_count > 0) {
+            resultLink.href = "/jobs/" + jobId;
+            resultLink.hidden = false;
+          } else {
+            setMessage("Processing complete — no clips were detected.", "success");
+          }
         } else if (data.state === "failed" || data.state === "cancelled") {
           clearInterval(pollTimer);
           pollTimer = null;
