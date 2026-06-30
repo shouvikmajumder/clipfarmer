@@ -1,15 +1,15 @@
 :root {
-  --bg:              #fdf8f4;
-  --bg-surface:      #ffffff;
-  --accent-primary:  #d97706;
-  --accent-secondary:#ea580c;
-  --accent-tertiary: #f43f5e;
-  --text:            #1c1410;
-  --text-muted:      #78665a;
-  --border:          rgba(0, 0, 0, 0.10);
-  --border-focus:    rgba(217, 119, 6, 0.45);
-  --error:           #dc2626;
-  --success:         #15803d;
+  --bg:              #ffeed6;
+  --bg-surface:      #fff8f0;
+  --accent-primary:  #e8a07c;
+  --accent-secondary:#c97a4e;
+  --accent-tertiary: #a5af79;
+  --text:            #3d2416;
+  --text-muted:      #827148;
+  --border:          rgba(130, 113, 72, 0.15);
+  --border-focus:    rgba(232, 160, 124, 0.55);
+  --error:           #c0392b;
+  --success:         #4a7c59;
   --radius:          14px;
 }
 
@@ -33,12 +33,12 @@ body {
   overflow-x: hidden;
   background: radial-gradient(
       ellipse 80% 60% at 50% 20%,
-      rgba(217, 119, 6, 0.10),
+      rgba(232, 160, 124, 0.15),
       transparent 60%
     ),
     radial-gradient(
       ellipse 70% 50% at 80% 80%,
-      rgba(234, 88, 12, 0.07),
+      rgba(165, 175, 121, 0.12),
       transparent 60%
     ),
     var(--bg);
@@ -54,7 +54,7 @@ body {
   z-index: 0;
   background: radial-gradient(
     circle at 50% 45%,
-    rgba(217, 119, 6, 0.06),
+    rgba(232, 160, 124, 0.08),
     transparent 45%
   );
 }
@@ -118,20 +118,20 @@ h1 {
   gap: 8px;
   width: 100%;
   padding: 8px;
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 248, 240, 0.97);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.80) inset,
-    0 4px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 0 0 1px rgba(255, 238, 214, 0.9) inset,
+    0 4px 24px rgba(130, 113, 72, 0.10);
   backdrop-filter: blur(16px);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .input-row:focus-within {
   border-color: var(--border-focus);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.80) inset,
-    0 0 0 3px rgba(217, 119, 6, 0.14),
-    0 4px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 0 0 1px rgba(255, 248, 240, 0.9) inset,
+    0 0 0 3px rgba(232, 160, 124, 0.18),
+    0 4px 24px rgba(130, 113, 72, 0.10);
 }
 
 input[type="url"] {
