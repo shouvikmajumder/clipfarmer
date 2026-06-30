@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-# Path to settings.yaml relative to this file: openclaw/core/url_validator.py -> openclaw/config
+# Path to settings.yaml relative to this file: datapipeline/core/url_validator.py -> datapipeline/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 # Matches youtube.com/watch?v=, youtube.com/shorts/, youtu.be/, m.youtube.com, etc.

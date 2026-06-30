@@ -32,7 +32,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # Path to settings.yaml relative to this file:
-# openclaw/processing/comments.py -> openclaw/config
+# datapipeline/processing/comments.py -> datapipeline/config
 SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.yaml"
 
 # Default values mirroring detection: block in settings.yaml

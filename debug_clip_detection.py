@@ -30,12 +30,12 @@ import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Make the in-repo `processing` package importable. It lives under openclaw/.
+# Make the in-repo `processing` package importable. It lives under datapipeline/.
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent
-OPENCLAW = ROOT / "openclaw"
-if str(OPENCLAW) not in sys.path:
-    sys.path.insert(0, str(OPENCLAW))
+DATAPIPELINE = ROOT / "datapipeline"
+if str(DATAPIPELINE) not in sys.path:
+    sys.path.insert(0, str(DATAPIPELINE))
 
 # ---------------------------------------------------------------------------
 # Output formatting (ANSI, stdlib only)
@@ -652,7 +652,7 @@ def main():
     import tempfile
     import shutil
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="openclaw_debug_"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="datapipeline_debug_"))
     wall0 = time.time()
 
     try:

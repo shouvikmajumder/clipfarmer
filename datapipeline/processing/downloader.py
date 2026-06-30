@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 # Root of all job data. Resolved relative to this file so it works regardless
-# of the caller's current working directory: openclaw/processing/downloader.py -> openclaw/data
+# of the caller's current working directory: datapipeline/processing/downloader.py -> datapipeline/data
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 JOBS_DIR = DATA_DIR / "jobs"
 
@@ -25,6 +25,16 @@ def _job_raw_dir(job_id: str) -> Path:
     raw_dir = JOBS_DIR / job_id / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     return raw_dir
+
+
+def _progress_hook(d: dict) -> None:
+    if d["status"] == "downloading":
+        pct = d.get("_percent_str", "?%").strip()
+        speed = d.get("_speed_str", "?/s").strip()
+        eta = d.get("_eta_str", "?s").strip()
+        print(f"\r[download] {pct} at {speed} ETA {eta}    ", end="", flush=True)
+    elif d["status"] == "finished":
+        print(f"\r[download] Done — merging to MP4…" + " " * 20, flush=True)
 
 
 def download(job: dict) -> str:
@@ -61,9 +71,8 @@ def download(job: dict) -> str:
         ),
         "outtmpl": out_tmpl,
         "merge_output_format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
         "noplaylist": True,
+        "progress_hooks": [_progress_hook],
     }
 
     try:
