@@ -1,16 +1,16 @@
 :root {
-  --bg-deep: #0c0e16;
-  --bg-mid: #12131f;
-  --accent-violet: #8b7cf6;
-  --accent-blue: #60a5fa;
-  --accent-teal: #5eead4;
-  --text: #e9e9f3;
-  --text-muted: #9b9bb0;
-  --border: rgba(255, 255, 255, 0.08);
-  --border-focus: rgba(139, 124, 246, 0.55);
-  --error: #f29696;
-  --success: #8fd9b6;
-  --radius: 14px;
+  --bg:              #fdf8f4;
+  --bg-surface:      #ffffff;
+  --accent-primary:  #d97706;
+  --accent-secondary:#ea580c;
+  --accent-tertiary: #f43f5e;
+  --text:            #1c1410;
+  --text-muted:      #78665a;
+  --border:          rgba(0, 0, 0, 0.10);
+  --border-focus:    rgba(217, 119, 6, 0.45);
+  --error:           #dc2626;
+  --success:         #15803d;
+  --radius:          14px;
 }
 
 * {
@@ -33,15 +33,15 @@ body {
   overflow-x: hidden;
   background: radial-gradient(
       ellipse 80% 60% at 50% 20%,
-      rgba(139, 124, 246, 0.16),
+      rgba(217, 119, 6, 0.10),
       transparent 60%
     ),
     radial-gradient(
       ellipse 70% 50% at 80% 80%,
-      rgba(94, 234, 212, 0.08),
+      rgba(234, 88, 12, 0.07),
       transparent 60%
     ),
-    linear-gradient(160deg, var(--bg-deep) 0%, var(--bg-mid) 100%);
+    var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
@@ -54,7 +54,7 @@ body {
   z-index: 0;
   background: radial-gradient(
     circle at 50% 45%,
-    rgba(96, 165, 250, 0.1),
+    rgba(217, 119, 6, 0.06),
     transparent 45%
   );
 }
@@ -81,9 +81,9 @@ h1 {
   letter-spacing: -0.02em;
   background: linear-gradient(
     100deg,
-    var(--accent-violet),
-    var(--accent-blue) 55%,
-    var(--accent-teal)
+    var(--accent-primary),
+    var(--accent-secondary) 55%,
+    var(--accent-tertiary)
   );
   -webkit-background-clip: text;
   background-clip: text;
@@ -118,20 +118,20 @@ h1 {
   gap: 8px;
   width: 100%;
   padding: 8px;
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(255, 255, 255, 0.95);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.02) inset,
-    0 20px 60px -20px rgba(91, 71, 220, 0.35), 0 4px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.80) inset,
+    0 4px 24px rgba(0, 0, 0, 0.08);
   backdrop-filter: blur(16px);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .input-row:focus-within {
   border-color: var(--border-focus);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04) inset,
-    0 0 0 3px rgba(139, 124, 246, 0.18),
-    0 24px 70px -20px rgba(91, 71, 220, 0.45), 0 4px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.80) inset,
+    0 0 0 3px rgba(217, 119, 6, 0.14),
+    0 4px 24px rgba(0, 0, 0, 0.08);
 }
 
 input[type="url"] {
@@ -143,7 +143,7 @@ input[type="url"] {
   border-radius: 9px;
   background: transparent;
   color: var(--text);
-  caret-color: var(--accent-blue);
+  caret-color: var(--accent-primary);
 }
 
 input[type="url"]::placeholder {
@@ -163,12 +163,12 @@ button {
   padding: 14px 22px;
   font-size: 1rem;
   font-weight: 600;
-  color: #0c0e16;
+  color: #fff;
   background: linear-gradient(
     100deg,
-    var(--accent-violet),
-    var(--accent-blue) 60%,
-    var(--accent-teal)
+    var(--accent-primary),
+    var(--accent-secondary) 60%,
+    var(--accent-tertiary)
   );
   border: none;
   border-radius: 9px;
@@ -192,7 +192,7 @@ button:disabled {
 
 button:focus-visible,
 input:focus-visible {
-  outline: 2px solid var(--accent-blue);
+  outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
 }
 
@@ -230,4 +230,128 @@ input:focus-visible {
   h1 {
     font-size: 1.6rem;
   }
+}
+
+/* Progress bar */
+.progress-container {
+  width: 100%;
+  height: 6px;
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 3px;
+  margin-top: 20px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
+  transition: width 0.5s ease;
+}
+
+.status-label {
+  margin: 8px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  min-height: 1.2em;
+}
+
+.result-link {
+  display: inline-block;
+  margin-top: 20px;
+  padding: 12px 24px;
+  background: linear-gradient(100deg, var(--accent-primary), var(--accent-secondary));
+  color: #fff;
+  text-decoration: none;
+  border-radius: var(--radius);
+  font-weight: 600;
+  font-size: 0.95rem;
+  transition: filter 0.15s ease, transform 0.05s ease;
+}
+
+.result-link:hover {
+  filter: brightness(1.08);
+}
+
+.result-link:active {
+  transform: scale(0.98);
+}
+
+/* Results page */
+.results-page {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 620px;
+  padding: 0 8px;
+}
+
+.back-link {
+  display: inline-block;
+  margin-bottom: 28px;
+  color: var(--accent-primary);
+  text-decoration: none;
+  font-size: 0.92rem;
+  font-weight: 500;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+
+.video-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.07);
+  margin-bottom: 24px;
+}
+
+.video-thumbnail {
+  width: 100%;
+  display: block;
+  aspect-ratio: 16/9;
+  object-fit: cover;
+}
+
+.video-info {
+  padding: 16px 20px;
+}
+
+.video-title {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.clip-count {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.download-link {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 9px 18px;
+  background: linear-gradient(100deg, var(--accent-primary), var(--accent-secondary));
+  color: #fff;
+  text-decoration: none;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  transition: filter 0.15s ease;
+}
+
+.download-link:hover {
+  filter: brightness(1.08);
+}
+
+.job-error {
+  color: var(--error);
+  font-size: 0.92rem;
+  margin-top: 12px;
 }
