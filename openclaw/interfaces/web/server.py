@@ -21,7 +21,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 
 # Running this file directly (``python interfaces/web/server.py``) puts only
 # this file's own directory on sys.path, not the openclaw/ package root, so
@@ -33,8 +33,10 @@ if str(_OPENCLAW_ROOT) not in sys.path:
 
 try:
     from core.state import enqueue_job
+    from core import state
 except ImportError:
     enqueue_job = None
+    state = None
 
 STATIC_DIR = Path(__file__).resolve().parent
 
@@ -54,7 +56,7 @@ def static_asset(filename):
     Restricted to the known asset filenames so this can't be used as a
     generic directory-traversal-style file server for the rest of the repo.
     """
-    if filename not in {"style.css", "app.js"}:
+    if filename not in {"style.css", "app.js", "job.html", "job.js"}:
         return jsonify(error="Not found"), 404
     return send_from_directory(STATIC_DIR, filename)
 
@@ -101,6 +103,100 @@ def create_job():
         return jsonify(error=f"Failed to enqueue job: {exc}"), 500
 
     return jsonify(job_id=job_id), 200
+
+
+@app.route("/api/jobs/<job_id>")
+def get_job_status(job_id):
+    """Return the current status and clip count for an existing job.
+
+    Responses:
+        200 {"job_id", "state", "current_stage", "last_stage_completed",
+             "youtube_id", "video_title", "clip_count"}
+        404 {"error": "Job not found"}               — unknown job_id.
+        503 {"error": "..."}                          — state module unavailable.
+    """
+    if state is None:
+        return (
+            jsonify(
+                error="Job queue is not available yet (core.state is not "
+                "implemented). Please try again shortly."
+            ),
+            503,
+        )
+
+    try:
+        job = state.get_job(job_id)
+    except FileNotFoundError:
+        return jsonify(error="Job not found"), 404
+
+    clips = state.get_clips(job_id)
+    return (
+        jsonify(
+            job_id=job.get("id"),
+            state=job.get("state"),
+            current_stage=job.get("current_stage"),
+            last_stage_completed=job.get("last_stage_completed"),
+            youtube_id=job.get("youtube_id"),
+            video_title=job.get("video_title"),
+            clip_count=len(clips),
+        ),
+        200,
+    )
+
+
+@app.route("/jobs/<job_id>")
+def job_page(job_id):
+    """Serve the job results HTML page."""
+    return send_from_directory(STATIC_DIR, "job.html")
+
+
+@app.route("/jobs/<job_id>/video")
+def job_video(job_id):
+    """Stream the raw downloaded .mp4 for a job.
+
+    Validates the job exists first so the job_id is confirmed to be a real UUID
+    before any filesystem path is constructed. Tries the canonical
+    ``raw/<youtube_id>.mp4`` path first, then falls back to the first sorted
+    file found under the ``raw/`` directory.
+
+    Responses:
+        200 video/mp4 stream
+        404 {"error": "Job not found"}      — unknown job_id.
+        404 {"error": "Video not found"}    — job exists but no raw video yet.
+        503 {"error": "..."}               — state module unavailable.
+    """
+    if state is None:
+        return (
+            jsonify(
+                error="Job queue is not available yet (core.state is not "
+                "implemented). Please try again shortly."
+            ),
+            503,
+        )
+
+    try:
+        job = state.get_job(job_id)
+    except FileNotFoundError:
+        return jsonify(error="Job not found"), 404
+
+    raw_dir = state.JOBS_DIR / job_id / "raw"
+    youtube_id = job.get("youtube_id")
+
+    video_path: Path | None = None
+    if youtube_id:
+        candidate = raw_dir / f"{youtube_id}.mp4"
+        if candidate.is_file():
+            video_path = candidate
+
+    if video_path is None and raw_dir.is_dir():
+        candidates = sorted(raw_dir.glob("*.*"))
+        if candidates:
+            video_path = candidates[0]
+
+    if video_path is None:
+        return jsonify(error="Video not found"), 404
+
+    return send_file(video_path, mimetype="video/mp4", as_attachment=False, conditional=True)
 
 
 if __name__ == "__main__":
