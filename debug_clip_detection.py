@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OpenClaw clip detection debug script.
+ClipFarmer clip detection debug script.
 Usage: python debug_clip_detection.py <YOUTUBE_URL> [--profile default] [--max-clips 3]
 
 Standalone integration runner for the clip detection layer. Runs the REAL
@@ -30,12 +30,12 @@ import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Make the in-repo `processing` package importable. It lives under datapipeline/.
+# Make the in-repo `processing` package importable. It lives under clipfarmer/.
 # ---------------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent
-DATAPIPELINE = ROOT / "datapipeline"
-if str(DATAPIPELINE) not in sys.path:
-    sys.path.insert(0, str(DATAPIPELINE))
+CLIPFARMER = ROOT / "clipfarmer"
+if str(CLIPFARMER) not in sys.path:
+    sys.path.insert(0, str(CLIPFARMER))
 
 # ---------------------------------------------------------------------------
 # Output formatting (ANSI, stdlib only)
@@ -629,7 +629,7 @@ def summary(total_wall):
 # main
 # ===========================================================================
 def main():
-    parser = argparse.ArgumentParser(description="OpenClaw clip detection debug runner")
+    parser = argparse.ArgumentParser(description="ClipFarmer clip detection debug runner")
     parser.add_argument("url", help="YouTube URL to test against")
     parser.add_argument("--profile", default="default",
                         choices=["podcast", "sports", "gaming", "default"],
@@ -642,7 +642,7 @@ def main():
 
     print(f"""
 {BOLD}╔{'═' * 54}╗
-║     OpenClaw Clip Detection — Debug Runner           ║
+║     ClipFarmer Clip Detection — Debug Runner           ║
 ╚{'═' * 54}╝{RESET}
 
   URL:       {args.url}
@@ -652,7 +652,7 @@ def main():
     import tempfile
     import shutil
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="datapipeline_debug_"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="clipfarmer_debug_"))
     wall0 = time.time()
 
     try:

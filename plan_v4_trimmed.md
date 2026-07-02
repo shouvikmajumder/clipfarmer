@@ -27,7 +27,7 @@ The v3 plan was built around two optional UI layers (Telegram bot, Flask web UI)
 ## 2. Project Structure
 
 ```
-openclaw/
+clipfarmer/
 ├── main.py                      # CLI: python main.py <youtube_url>
 ├── requirements.txt
 ├── pytest.ini
@@ -55,7 +55,7 @@ openclaw/
 │   ├── tiktok.py                # TikTok Content Posting API upload
 │   └── instagram.py             # Instagram Graph API → Reels upload
 ├── data/
-│   ├── openclaw.db
+│   ├── clipfarmer.db
 │   ├── jobs/                    # Per-job working dirs, cleaned after success
 │   └── logs/
 └── tests/

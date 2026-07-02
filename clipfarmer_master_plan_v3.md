@@ -1,11 +1,11 @@
-# OpenClaw v3 Master Build Plan
+# ClipFarmer v3 Master Build Plan
 > Request-driven architecture. Supersedes v1 and v2. This is the document to hand to Claude Code.
 
 ---
 
 ## 1. Paradigm Shift
 
-OpenClaw is no longer a 24/7 autonomous content discovery system. It is now an **on-demand clip processing service** with two entry points: a Telegram bot you message YouTube links to, and a manual web UI where you paste links into a form. Both feed the same processing pipeline. Results return through whichever interface the user requested from (with optional opt-in posting at the end).
+ClipFarmer is no longer a 24/7 autonomous content discovery system. It is now an **on-demand clip processing service** with two entry points: a Telegram bot you message YouTube links to, and a manual web UI where you paste links into a form. Both feed the same processing pipeline. Results return through whichever interface the user requested from (with optional opt-in posting at the end).
 
 This eliminates entire classes of risk: no more channel monitoring failures, no scheduled cron windows, no shadowban risk from automated posting, no need to discover what's new. You decide what to clip. The system clips it.
 
@@ -39,7 +39,7 @@ This eliminates entire classes of risk: no more channel monitoring failures, no 
 ## 3. New Project Structure
 
 ```
-openclaw/
+clipfarmer/
 ├── main.py                      # Launches bot + worker + web UI concurrently
 ├── requirements.txt
 ├── pytest.ini
@@ -80,7 +80,7 @@ openclaw/
 ├── assets/
 │   └── music/                   # Royalty-free CC0 tracks
 ├── data/
-│   ├── openclaw.db
+│   ├── clipfarmer.db
 │   ├── jobs/                    # Per-job working subdirectories
 │   └── logs/
 ├── scratch/                     # USB-C drive mount point
@@ -448,7 +448,7 @@ Each of these is a real risk this redesign introduces — listed with the mitiga
 
 ```yaml
 general:
-  scratch_dir: /Volumes/OpenClawScratch
+  scratch_dir: /Volumes/ClipFarmerScratch
   max_clip_length_s: 60
   min_clip_score: 0.45
   max_clips_per_job: 3

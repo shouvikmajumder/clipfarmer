@@ -1,0 +1,38 @@
+# Python
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+
+# macOS
+.DS_Store
+
+# Job working directories (runtime artifacts: metadata, raw footage, cut clips)
+data/jobs/*
+!data/jobs/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+
+# SQLite databases
+data/*.db
+
+# Worker singleton lock
+data/worker.lock
