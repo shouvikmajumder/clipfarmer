@@ -1,0 +1,62 @@
+general:
+  max_clip_length_s: 60
+  min_clip_score: 0.45
+  max_clips_per_job: 3
+  max_video_duration_hard_limit_s: 21600
+  min_free_disk_gb: 5
+  data_dir: data/
+
+worker:
+  whisper_model: medium          # model used for full-video transcription
+  clip_whisper_model: base       # smaller/faster model used when transcribing short final clips for captions
+  job_poll_interval_s: 5
+
+detection:
+  # Sliding-window bounds for candidate clip extraction
+  window_min_s: 20               # minimum window length in seconds
+  window_max_s: 45               # maximum window length in seconds
+  window_step_s: 5               # step size between window sizes
+
+  top_k: 6                       # number of candidate windows kept before boundary refinement
+  final_clips: 3                 # number of clips shipped after deduplication
+
+  social_confidence_cap: 0.65    # maximum trust ever given to the comment/social signal
+  comment_cluster_window_s: 15   # ±seconds for sliding-window timestamp clustering on comments
+  boundary_search_s: 10          # ±seconds to snap window edges to the nearest sentence boundary
+  laughter_extend_s: 1.5         # extra seconds appended past detected laughter so the laugh resolves
+  dramatic_pause_min_s: 0.6      # minimum silence duration (s) counted as a dramatic pause
+
+  # Keywords that mark sponsor segments; windows overlapping these are penalised
+  sponsor_keywords:
+    - "use code"
+    - "sponsored"
+    - "check out"
+    - "ad starts"
+    - "promo code"
+    - "discount code"
+
+  # Per-signal weights for scoring candidate windows.
+  # Two profiles: 'default' (transcript available) and 'no_transcript' (fallback).
+  # Each profile's weights sum to exactly 1.0.
+  # Social signal confidence is fused separately and capped at social_confidence_cap.
+  weights:
+    default:                     # transcript present
+      hook_quality: 0.18
+      coherence: 0.12
+      sentiment: 0.20
+      specificity: 0.15
+      curiosity: 0.12
+      audio_energy: 0.08
+      laughter: 0.08
+      dramatic_pause: 0.07
+    no_transcript:               # fallback: content signals absent; social handled via fusion
+      audio_energy: 0.45
+      laughter: 0.35
+      dramatic_pause: 0.20
+
+posting:
+  platforms:
+    - youtube
+    - tiktok
+    - instagram
+  max_retries: 3
